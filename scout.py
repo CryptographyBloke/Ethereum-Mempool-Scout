@@ -20,7 +20,7 @@ from web3 import AsyncWeb3
 from web3.providers import WebSocketProvider
 
 # ─── 🔧 配置区 ──────────────────────────────────────────────
-WSS_NODE_URL = "wss://eth-mainnet.g.alchemy.com/v2/ZjU7VuvJQPgMNFdYFJcE6"          # ← 替换这里！
+WSS_NODE_URL = "<your_URL>"          # ← 替换这里！
 
 UNISWAP_V2_ROUTER = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
 LARGE_SWAP_THRESHOLD_ETH = 10                      # 大额 Swap 阈值（ETH）
