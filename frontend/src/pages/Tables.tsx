@@ -45,12 +45,12 @@ export function Sandwiches({ params, liveCount }: { params: Params; liveCount: n
   if (r.error) return <ErrorState error={r.error} retry={r.reload} />;
   if (!r.data) return <Loading />;
   return (
-    <Card title={t("Detected sandwich attacks")} subtitle={t("Front-run and back-run by the same bot around a victim swap in the same pool. Profit is gross (before gas and builder tips), shown when the pool's profit token is WETH.")}>
+    <Card title={t("Detected sandwich attacks")} subtitle={t("Front-run and back-run by the same bot around a victim swap in the same pool. Profit is shown when the pool's profit token is WETH; net profit subtracts the gas of the front- and back-run, but not direct payments to the builder.")}>
       {r.data.length === 0 ? <Empty>{t("No sandwiches detected yet.")}</Empty> : (
         <div className="table-wrap">
           <table>
             <thead>
-              <tr><th>{t("Block")}</th><th>{t("Time")}</th><th>{t("Victim")}</th><th>{t("Victim visibility")}</th><th>{t("Victim swap")}</th><th>{t("Attacker")}</th><th>{t("Front / back")}</th><th className="num">{t("Gross profit")}</th><th>{t("Builder")}</th></tr>
+              <tr><th>{t("Block")}</th><th>{t("Time")}</th><th>{t("Victim")}</th><th>{t("Victim visibility")}</th><th>{t("Victim swap")}</th><th>{t("Attacker")}</th><th>{t("Front / back")}</th><th className="num">{t("Gross profit")}</th><th className="num">{t("Gas")}</th><th className="num">{t("Net profit")}</th><th>{t("Builder")}</th></tr>
             </thead>
             <tbody>
               {r.data.map((s) => (
@@ -63,6 +63,8 @@ export function Sandwiches({ params, liveCount }: { params: Params; liveCount: n
                   <td><Hash value={s.attacker} kind="addr" /></td>
                   <td className="mono small"><Hash value={s.front_hash} internal /> / <Hash value={s.back_hash} internal /></td>
                   <td className="num">{s.gross_profit_eth === null ? <span className="muted">{t("non-WETH")}</span> : eth(s.gross_profit_eth, 4)}</td>
+                  <td className="num muted">{s.gas_cost_eth === null ? "–" : eth(s.gas_cost_eth, 4)}</td>
+                  <td className="num">{s.net_profit_eth === null ? "–" : eth(s.net_profit_eth, 4)}</td>
                   <td className="truncate" title={s.builder_tag}>{s.builder_tag}</td>
                 </tr>
               ))}

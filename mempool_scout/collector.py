@@ -12,6 +12,11 @@ Two WebSocket subscriptions run on one connection:
 
 The session table records when the collector was running, so analysis only uses
 blocks that were observed with a warmed-up mempool view.
+
+Several collectors can share one database, one per *vantage point* (node or
+provider).  Each records its own sightings (``pending_sighting``); usually only
+one of them ingests blocks (the others run with ``blocks=False``).  Public
+swaps are quoted when first seen to measure the user's slippage tolerance.
 """
 
 from __future__ import annotations
@@ -25,7 +30,8 @@ from urllib.parse import urlparse
 
 from . import __version__
 from .constants import KNOWN_ROUTERS, TOKEN0_SELECTOR, TOKEN1_SELECTOR, WETH
-from .decoders import decode_swap_tx
+from .decoders import SwapIntent, decode_swap_tx
+from .quotes import quotable, quote_intent
 from .rpc import EthRpc, WsRpcClient
 from .sandwich import Sandwich, detect_sandwiches, extract_pool_swaps
 from .storage import Store
@@ -46,8 +52,11 @@ class CollectorConfig:
     large_swap_eth: float = 10.0
     sandwich_volume_tolerance: float = 0.2
     stats_interval_s: int = 30
-    commit_interval_s: float = 1.0
+    commit_interval_s: float = 0.5   # short write transactions: other collectors may share the file
     receipts: bool = True
+    blocks: bool = True                 # False = mempool-only collector (extra vantage point)
+    quotes: bool = True                 # quote public swaps to measure slippage tolerance
+    quote_concurrency: int = 8
     routers: dict[str, str] = field(default_factory=lambda: dict(KNOWN_ROUTERS))
 
 
@@ -63,6 +72,8 @@ class Counters:
     deploys: int = 0
     blocks: int = 0
     sandwiches: int = 0
+    quoted: int = 0
+    quote_errors: int = 0
 
 
 def tx_details(tx: Any) -> dict[str, Any]:
@@ -94,6 +105,8 @@ class Collector:
         self.queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue(maxsize=cfg.queue_size)
         self.block_queue: asyncio.Queue[int] = asyncio.Queue()
         self.eth: Any = None  # EthRpc (or a test double with the same methods)
+        self.quote_sem = asyncio.Semaphore(cfg.quote_concurrency)
+        self.background: set[asyncio.Task] = set()
 
     # ── mempool ───────────────────────────────────────────────────────────
     def on_pending(self, result: Any) -> None:
@@ -102,9 +115,14 @@ class Collector:
             tx_hash, tx_obj = to_hex(result), None
         else:
             tx_hash, tx_obj = to_hex(get(result, "hash")), result
-        if not self.store.record_pending_hash(tx_hash, seen, self.session_id):
+        new_here, new_overall = self.store.record_pending_hash(tx_hash, seen, self.session_id, self.cfg.vantage)
+        if not new_here:
             return  # re-announcement: keep the first sighting, do not fetch again
         self.counters.hashes += 1
+        # Mempool-only vantages never fetch, so "seen elsewhere first" does not mean
+        # "already decoded": fetch unless some collector already did.
+        if not new_overall and self.store.is_fetched(tx_hash):
+            return
         if tx_obj is not None:
             self.handle_tx(tx_hash, tx_obj, seen)
         elif self.cfg.fetch_mode == "full":
@@ -147,7 +165,12 @@ class Collector:
             return
         self.counters.swaps += 1
         router = d["to"] or ""
-        self.store.record_swap_intents(tx_hash, self.cfg.routers.get(router, router), intents, "mempool", seen_ms)
+        label = self.cfg.routers.get(router, router)
+        self.store.record_swap_intents(tx_hash, label, intents, "mempool", seen_ms)
+        if self.cfg.quotes and self.eth is not None and any(quotable(i) for i in intents):
+            task = asyncio.ensure_future(self.quote_intents(tx_hash, intents, router, label))
+            self.background.add(task)
+            task.add_done_callback(self.background.discard)
         notional = max((i.eth_notional_wei or 0) for i in intents)
         if notional >= self.cfg.large_swap_eth * 1e18:
             self.counters.large_swaps += 1
@@ -160,6 +183,18 @@ class Collector:
             }
             self.store.record_alert("large_swap", tx_hash, payload)
             log.info("large swap  %.2f ETH  %s  %s", notional / 1e18, first.function, tx_hash)
+
+    async def quote_intents(self, tx_hash: str, intents: list[SwapIntent], router: str, label: str) -> None:
+        async with self.quote_sem:
+            for idx, intent in enumerate(intents):
+                if not quotable(intent):
+                    continue
+                quote, tol, err = await quote_intent(self.eth, intent, router, label)
+                if err:
+                    self.counters.quote_errors += 1
+                else:
+                    self.counters.quoted += 1
+                self.store.record_quote(tx_hash, idx, quote, tol, now_ms(), err)
 
     # ── blocks ────────────────────────────────────────────────────────────
     def on_head(self, result: Any) -> None:
@@ -314,9 +349,10 @@ class Collector:
             if now_ms() - last_stats >= self.cfg.stats_interval_s * 1000:
                 last_stats = now_ms()
                 c = self.counters
-                log.info("stats  hashes=%s fetched=%s skipped=%s swaps=%s large=%s deploys=%s blocks=%s "
-                         "sandwiches=%s queue=%d", f"{c.hashes:,}", f"{c.fetched:,}", f"{c.fetch_skipped:,}",
-                         c.swaps, c.large_swaps, c.deploys, c.blocks, c.sandwiches, self.queue.qsize())
+                log.info("stats [%s]  hashes=%s fetched=%s skipped=%s swaps=%s quoted=%s/%s large=%s deploys=%s "
+                         "blocks=%s sandwiches=%s queue=%d", self.cfg.vantage, f"{c.hashes:,}", f"{c.fetched:,}",
+                         f"{c.fetch_skipped:,}", c.swaps, c.quoted, c.quoted + c.quote_errors, c.large_swaps,
+                         c.deploys, c.blocks, c.sandwiches, self.queue.qsize())
 
     async def _consume(self, queue: asyncio.Queue, handler: Any) -> None:
         while True:
@@ -341,22 +377,26 @@ class Collector:
             # explicit `false` but then never deliver notifications.
             pending_args = ("newPendingTransactions", True) if cfg.full_pending_objects else ("newPendingTransactions",)
             _, pending_q = await client.subscribe(*pending_args)
-            _, heads_q = await client.subscribe("newHeads")
             tasks = [
                 asyncio.create_task(self.periodic()),
-                asyncio.create_task(self.block_worker()),
                 asyncio.create_task(self._consume(pending_q, self.on_pending)),
-                asyncio.create_task(self._consume(heads_q, self.on_head)),
             ]
+            if cfg.blocks:
+                _, heads_q = await client.subscribe("newHeads")
+                tasks += [asyncio.create_task(self.block_worker()),
+                          asyncio.create_task(self._consume(heads_q, self.on_head))]
+            else:
+                log.info("mempool-only mode: vantage %r records sightings, blocks come from another collector",
+                         cfg.vantage)
             if cfg.fetch_mode == "full" and not cfg.full_pending_objects:
                 tasks += [asyncio.create_task(self.fetch_worker()) for _ in range(cfg.workers)]
             try:
                 await client.closed.wait()
                 raise ConnectionError("WebSocket connection closed")
             finally:
-                for t in tasks:
+                for t in [*tasks, *self.background]:
                     t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(*tasks, *self.background, return_exceptions=True)
                 self.store.end_session(self.session_id)
                 self.session_id = None
                 if client.dropped_notifications:

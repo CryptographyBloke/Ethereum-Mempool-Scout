@@ -50,7 +50,7 @@ export function Overview({ params, live }: { params: Params; live: LiveState }) 
           <div className="hero-value">{pct(o.public_share)}</div>
           {o.eligible_blocks > 0 ? (
             <p className="muted">
-              {t("{public} of {total} transactions in {blocks} observed blocks. The rest reached builders privately (or never reached this node).", { public: num(o.public_txs), total: num(o.txs), blocks: num(o.eligible_blocks) })}
+              {t("{public} of {total} transactions in {blocks} observed blocks. The rest reached builders privately (or never reached any vantage point).", { public: num(o.public_txs), total: num(o.txs), blocks: num(o.eligible_blocks) })}
             </p>
           ) : (
             <p className="notice">
@@ -62,7 +62,7 @@ export function Overview({ params, live }: { params: Params; live: LiveState }) 
           <StatTile label={t("Uniswap router swaps seen publicly")} value={pct(o.router_swap_public_share)}
             note={`${num(o.public_router_swaps)} of ${num(o.router_swaps)}`} />
           <StatTile label={t("Sandwich attacks detected")} value={num(o.sandwiches)}
-            note={t("{count} attackers · {profit} gross", { count: num(o.sandwich_attackers), profit: eth(o.sandwich_gross_profit_eth) })} />
+            note={t("{count} attackers · {profit} net of gas", { count: num(o.sandwich_attackers), profit: eth(o.sandwich_net_profit_eth) })} />
           <StatTile label={t("Sandwich victims seen publicly")} value={pct(o.sandwich_victim_public_share)}
             note={`${num(o.sandwich_victims_public)} of ${num(o.sandwiches)}`} />
           <StatTile label={t("Pending hashes recorded")} value={compact(o.pending_hashes)}
@@ -72,7 +72,7 @@ export function Overview({ params, live }: { params: Params; live: LiveState }) 
 
       <Card
         title={t("Public-mempool share over time")}
-        subtitle={t("Share of included transactions whose hash this node saw before the block's timestamp.")}
+        subtitle={t("Share of included transactions whose hash any vantage saw before the block's timestamp.")}
         actions={
           <label className="field">
             {t("Bucket")}

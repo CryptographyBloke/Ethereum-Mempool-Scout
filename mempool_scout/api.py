@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -59,10 +60,26 @@ def create_app(db_path: str, frontend_dir: str | Path | None = DEFAULT_FRONTEND,
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
+        """For uptime monitors: per-vantage heartbeat and the latest stored block."""
         with db() as c:
-            last = c.execute("SELECT MAX(heartbeat_ms) FROM sessions").fetchone()[0]
-            head = c.execute("SELECT MAX(number) FROM blocks").fetchone()[0]
-        return {"version": __version__, "last_heartbeat_ms": last, "head": head}
+            head = c.execute("SELECT MAX(number), MAX(received_ms) FROM blocks").fetchone()
+            vs = A.vantage_status(c)
+        now = int(time.time() * 1000)
+        for v in vs:
+            v["active"] = v["last_heartbeat_ms"] is not None and now - v["last_heartbeat_ms"] < 60_000
+        last = max((v["last_heartbeat_ms"] or 0 for v in vs), default=None) or None
+        return {"version": __version__, "last_heartbeat_ms": last, "head": head[0], "head_received_ms": head[1],
+                "vantages": vs, "ok": any(v["active"] for v in vs)}
+
+    @app.get("/api/vantages")
+    def vantages(warmup_min: float = W, grace_ms: int = G) -> dict[str, Any]:
+        with db() as c:
+            return A.vantages(c, params(warmup_min, grace_ms))
+
+    @app.get("/api/slippage")
+    def slippage(warmup_min: float = W, grace_ms: int = G) -> dict[str, Any]:
+        with db() as c:
+            return A.slippage(c, params(warmup_min, grace_ms))
 
     @app.get("/api/meta")
     def meta() -> dict[str, Any]:
