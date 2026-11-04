@@ -17,7 +17,7 @@ function fmtBucket(ts: number, bucketS: number): string {
 }
 
 export function Overview({ params, live }: { params: Params; live: LiveState }) {
-  const [bucketS, setBucketS] = usePref("scout.bucket", 3600);
+  const [bucketS, setBucketS] = usePref("scout.bucket", 300);
   const refresh = 15_000;
   const ov = useApi(() => api.overview(params), [params.warmupMin, params.graceMs, live.blockCount], undefined);
   const ts = useApi(() => api.timeseries(params, bucketS), [params.warmupMin, params.graceMs, bucketS], refresh);

@@ -12,6 +12,12 @@ events, and serves the results through a REST API and a web dashboard.
 
 ![Dashboard overview](docs/screenshot-overview.png)
 
+<details><summary>Blocks view</summary>
+
+![Blocks view](docs/screenshot-blocks.png)
+
+</details>
+
 ---
 
 ## Research questions
@@ -34,7 +40,17 @@ Definitions, statistics, threats to validity and related work are in
 A 12-minute pilot against a free public endpoint (`ethereum-rpc.publicnode.com`,
 3 Nov 2026) checked the whole pipeline on mainnet:
 
-PILOT_TABLE
+| Metric (5-min warm-up, 0 s grace) | Value |
+|---|---|
+| Collection window | 3 Nov 2026, 15:11–15:23 UTC (1 session, 1 vantage point) |
+| Pending hashes recorded | 9,312 |
+| Eligible blocks / included transactions | 34 / 9,969 |
+| Included transactions seen publicly first | 46.2% |
+| Uniswap router swaps seen publicly first | 13.1% (8 of 61) |
+| Inclusion delay of public transactions | median 6.6 s, p90 11.4 s |
+| Blocks with a plain client tag (geth) or no tag, 4 blocks | 95–100% public |
+| Blocks from the largest builders (Titan, Quasar, BuilderNet), 29 blocks | 39–48% public |
+| Sandwiches detected (all 60 blocks) | 5 |
 
 These numbers only show that the system works: one vantage point and a few minutes
 of data are not enough for conclusions. Comparable results need days of collection

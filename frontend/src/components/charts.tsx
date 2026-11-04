@@ -239,7 +239,10 @@ export function RateCompare({ groups, ariaLabel }: {
   const hi = Math.max(0.01, ...groups.map((g) => g.ci?.[1] ?? g.rate ?? 0));
   const xmax = niceMax(hi * 1.1);
   const sx = (v: number) => m.l + (v / xmax) * iw;
-  const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => f * xmax);
+  // 2.5-based maxima split cleanly into quarters, the others into fifths
+  const lead = xmax / Math.pow(10, Math.floor(Math.log10(xmax)));
+  const fracs = Math.abs(lead - 2.5) < 1e-9 ? [0, 0.25, 0.5, 0.75, 1] : [0, 0.2, 0.4, 0.6, 0.8, 1];
+  const ticks = fracs.map((f) => f * xmax);
   const fmt = (v: number) => `${(v * 100).toFixed(xmax < 0.05 ? 1 : 0)}%`;
 
   return (
