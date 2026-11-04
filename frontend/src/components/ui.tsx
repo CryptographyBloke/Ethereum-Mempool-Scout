@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { etherscanAddr, etherscanTx, short } from "../format";
+import { useI18n } from "../i18n";
 
 export function Card({ title, subtitle, actions, children, className = "" }: {
   title?: ReactNode;
@@ -37,11 +38,12 @@ export function StatTile({ label, value, note }: { label: string; value: ReactNo
 /** Chart with a "Table" toggle so every value is reachable without colour or hover. */
 export function ChartOrTable({ chart, table }: { chart: ReactNode; table: ReactNode }) {
   const [asTable, setAsTable] = useState(false);
+  const { t } = useI18n();
   return (
     <div>
-      <div className="seg" role="group" aria-label="View">
-        <button aria-pressed={!asTable} onClick={() => setAsTable(false)}>Chart</button>
-        <button aria-pressed={asTable} onClick={() => setAsTable(true)}>Table</button>
+      <div className="seg" role="group" aria-label={t("View")}>
+        <button aria-pressed={!asTable} onClick={() => setAsTable(false)}>{t("Chart")}</button>
+        <button aria-pressed={asTable} onClick={() => setAsTable(true)}>{t("Table")}</button>
       </div>
       {asTable ? <div className="table-wrap">{table}</div> : chart}
     </div>
@@ -68,18 +70,21 @@ export function Badge({ tone, children, icon }: { tone: "public" | "private" | "
 }
 
 export function Visibility({ isPublic }: { isPublic: boolean }) {
-  return isPublic ? <Badge tone="public" icon="●">public</Badge> : <Badge tone="private" icon="◆">private</Badge>;
+  const { t } = useI18n();
+  return isPublic ? <Badge tone="public" icon="●">{t("public")}</Badge> : <Badge tone="private" icon="◆">{t("private")}</Badge>;
 }
 
 export function Loading({ label = "Loading…" }: { label?: string }) {
-  return <div className="state" role="status">{label}</div>;
+  const { t } = useI18n();
+  return <div className="state" role="status">{t(label)}</div>;
 }
 
 export function ErrorState({ error, retry }: { error: Error; retry?: () => void }) {
+  const { t } = useI18n();
   return (
     <div className="state state-error" role="alert">
-      <strong>Could not load data.</strong> {error.message}
-      {retry && <button className="btn" onClick={retry}>Retry</button>}
+      <strong>{t("Could not load data.")}</strong> {error.message}
+      {retry && <button className="btn" onClick={retry}>{t("Retry")}</button>}
     </div>
   );
 }
