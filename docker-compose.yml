@@ -1,0 +1,26 @@
+# Usage:
+#   export SCOUT_WSS_URL=wss://eth-mainnet.g.alchemy.com/v2/<key>
+#   docker compose up --build
+# Dashboard: http://localhost:8000
+services:
+  collector:
+    build: .
+    command: ["collect", "--vantage", "${SCOUT_VANTAGE:-docker}"]
+    environment:
+      SCOUT_WSS_URL: ${SCOUT_WSS_URL:?set SCOUT_WSS_URL to a WebSocket endpoint}
+      SCOUT_DB: /data/scout.sqlite
+    volumes: ["scout-data:/data"]
+    restart: unless-stopped
+
+  api:
+    build: .
+    command: ["serve", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      SCOUT_DB: /data/scout.sqlite
+    volumes: ["scout-data:/data"]
+    ports: ["8000:8000"]
+    depends_on: [collector]
+    restart: unless-stopped
+
+volumes:
+  scout-data:

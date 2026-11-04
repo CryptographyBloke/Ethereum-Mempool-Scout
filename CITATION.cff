@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Ethereum Mempool Scout: measuring public-mempool visibility and sandwich exposure"
+type: software
+version: 2.0.0
+date-released: 2026-11-03
+license: MIT
+repository-code: "https://github.com/CryptographyBloke/Ethereum-Mempool-Scout"
+authors:
+  - alias: CryptographyBloke
+keywords:
+  - Ethereum
+  - mempool
+  - MEV
+  - sandwich attack
+  - proposer-builder separation
+  - measurement
