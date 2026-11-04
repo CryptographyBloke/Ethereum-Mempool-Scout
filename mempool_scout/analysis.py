@@ -6,8 +6,10 @@ same code.
 
 Key definitions (see docs/methodology.md):
 
-* **Eligible block** — a block whose timestamp falls inside a collector session,
-  at least ``warmup_ms`` after that session started (the local mempool view is
+* **Coverage period** — consecutive sessions of one vantage separated by at most
+  ``max_gap_ms`` (a quick reconnect does not empty the recorded view).
+* **Eligible block** — a block whose timestamp falls inside a coverage period, at
+  least ``warmup_ms`` after the period started (the recorded mempool view is
   incomplete right after start-up).
 * **Public transaction** — an included transaction whose hash any vantage point
   saw before ``block.timestamp + grace_ms``.  Everything else is treated as
@@ -29,6 +31,7 @@ from typing import Any
 class Params:
     warmup_ms: int = 5 * 60 * 1000
     grace_ms: int = 0
+    max_gap_ms: int = 60 * 1000
 
     def sql(self) -> dict[str, int]:
         return {"warmup_ms": self.warmup_ms, "grace_ms": self.grace_ms}
@@ -38,12 +41,33 @@ class Params:
 SANDWICH_GAS = """(SELECT SUM(CAST(t.gas_used AS REAL) * CAST(t.effective_gas_price AS REAL)) / 1e18
      FROM block_tx t WHERE t.hash IN (s.front_hash, s.back_hash))"""
 
+def coverage_periods(conn: sqlite3.Connection, max_gap_ms: int) -> list[tuple[str, int, int]]:
+    """Merge each vantage's sessions into continuous coverage periods."""
+    periods: list[list[Any]] = []
+    rows = conn.execute("""SELECT COALESCE(vantage, 'default'), started_ms, heartbeat_ms FROM sessions
+                           ORDER BY COALESCE(vantage, 'default'), started_ms""").fetchall()
+    for vantage, start, end in rows:
+        last = periods[-1] if periods else None
+        if last and last[0] == vantage and start - last[2] <= max_gap_ms:
+            last[2] = max(last[2], end)
+        else:
+            periods.append([vantage, start, end])
+    return [tuple(x) for x in periods]  # type: ignore[misc]
+
+
+def _prepare(conn: sqlite3.Connection, p: Params) -> None:
+    """(Re)build ``temp.coverage``, which the eligibility CTEs read.  Works on read-only connections."""
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS coverage (vantage TEXT, start_ms INTEGER, end_ms INTEGER)")
+    conn.execute("DELETE FROM temp.coverage")
+    conn.executemany("INSERT INTO temp.coverage VALUES (?,?,?)", coverage_periods(conn, p.max_gap_ms))
+
+
 ELIGIBLE = """
 WITH eb AS (
     SELECT b.* FROM blocks b
-    WHERE EXISTS (SELECT 1 FROM sessions s
-                  WHERE s.started_ms + :warmup_ms <= b.timestamp * 1000
-                    AND b.timestamp * 1000 <= s.heartbeat_ms)
+    WHERE EXISTS (SELECT 1 FROM temp.coverage c
+                  WHERE c.start_ms + :warmup_ms <= b.timestamp * 1000
+                    AND b.timestamp * 1000 <= c.end_ms)
 ),
 etx AS (
     SELECT t.*, eb.timestamp AS block_ts, eb.builder_tag, p.first_seen_ms,
@@ -93,6 +117,7 @@ def _all(conn: sqlite3.Connection, sql: str, params: dict[str, Any] | None = Non
 
 # ── Overview ────────────────────────────────────────────────────────────────
 def overview(conn: sqlite3.Connection, p: Params, large_swap_eth: float = 10.0) -> dict[str, Any]:
+    _prepare(conn, p)
     q = p.sql()
     sess = _one(conn, """SELECT COUNT(*) n, MIN(started_ms) first_ms, MAX(heartbeat_ms) last_ms,
                                 COALESCE(SUM(heartbeat_ms - started_ms), 0) runtime_ms FROM sessions""")
@@ -143,6 +168,7 @@ def overview(conn: sqlite3.Connection, p: Params, large_swap_eth: float = 10.0) 
 
 # ── Visibility ──────────────────────────────────────────────────────────────
 def visibility_timeseries(conn: sqlite3.Connection, p: Params, bucket_s: int = 3600) -> list[dict[str, Any]]:
+    _prepare(conn, p)
     rows = _all(conn, ELIGIBLE + """
         SELECT (block_ts / :bucket) * :bucket AS bucket_ts,
                COUNT(DISTINCT block_number) blocks,
@@ -156,6 +182,7 @@ def visibility_timeseries(conn: sqlite3.Connection, p: Params, bucket_s: int = 3
 
 
 def visibility_by_type(conn: sqlite3.Connection, p: Params) -> list[dict[str, Any]]:
+    _prepare(conn, p)
     rows = _all(conn, ELIGIBLE + """
         SELECT COALESCE(tx_type, -1) tx_type, COUNT(*) txs, SUM(is_public) public_txs
         FROM etx GROUP BY tx_type ORDER BY txs DESC""", p.sql())
@@ -165,6 +192,7 @@ def visibility_by_type(conn: sqlite3.Connection, p: Params) -> list[dict[str, An
 
 
 def builders(conn: sqlite3.Connection, p: Params, limit: int = 15) -> list[dict[str, Any]]:
+    _prepare(conn, p)
     rows = _all(conn, ELIGIBLE + """
         , sw AS (SELECT block_number, COUNT(*) n FROM sandwiches GROUP BY block_number)
         SELECT eb.builder_tag, COUNT(*) blocks,
@@ -190,6 +218,7 @@ DELAY_EDGES_S = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256]
 
 def inclusion_delay(conn: sqlite3.Connection, p: Params) -> dict[str, Any]:
     """Distribution of (block timestamp - first seen) for public transactions."""
+    _prepare(conn, p)
     delays = [r[0] for r in conn.execute(ELIGIBLE + """
         SELECT block_ts * 1000 - first_seen_ms FROM etx WHERE is_public = 1""", p.sql())]
     delays.sort()
@@ -208,6 +237,7 @@ def inclusion_delay(conn: sqlite3.Connection, p: Params) -> dict[str, Any]:
 # ── Sandwich exposure (the headline research question) ──────────────────────
 def exposure(conn: sqlite3.Connection, p: Params) -> dict[str, Any]:
     """Are publicly visible router swaps sandwiched more often than private ones?"""
+    _prepare(conn, p)
     rows = {r["is_public"]: r for r in _all(conn, ELIGIBLE + """
         SELECT e.is_public, COUNT(*) swaps,
                SUM(CASE WHEN EXISTS (SELECT 1 FROM sandwiches s WHERE s.victim_hash = e.hash) THEN 1 ELSE 0 END) sandwiched
@@ -329,7 +359,7 @@ def alerts_since(conn: sqlite3.Connection, after_id: int = 0, limit: int = 50) -
 VANTAGE_CTE = """
 WITH cov AS (
     SELECT b.number, b.timestamp FROM blocks b
-    JOIN sessions s ON s.started_ms + :warmup_ms <= b.timestamp * 1000 AND b.timestamp * 1000 <= s.heartbeat_ms
+    JOIN temp.coverage s ON s.start_ms + :warmup_ms <= b.timestamp * 1000 AND b.timestamp * 1000 <= s.end_ms
     GROUP BY b.number HAVING COUNT(DISTINCT s.vantage) = :nv
 ),
 ctx AS (
@@ -360,6 +390,7 @@ def vantages(conn: sqlite3.Connection, p: Params) -> dict[str, Any]:
     union of all vantages is the best available estimate, so
     ``union_share - vantage_share`` bounds that vantage's measurement error.
     """
+    _prepare(conn, p)
     status = vantage_status(conn)
     names = [v["vantage"] for v in status]
     if not names:
@@ -377,6 +408,12 @@ def vantages(conn: sqlite3.Connection, p: Params) -> dict[str, Any]:
                AVG(s.first_seen_ms - a.fastest) avg_lag_ms
         FROM seen s JOIN agg a ON a.hash = s.hash JOIN ctx x ON x.hash = s.hash
         GROUP BY s.vantage""", q)}
+    medians = {r["vantage"]: r["lag"] for r in _all(conn, VANTAGE_CTE + """
+        , lags AS (SELECT s.vantage, s.first_seen_ms - a.fastest lag,
+                          ROW_NUMBER() OVER (PARTITION BY s.vantage ORDER BY s.first_seen_ms - a.fastest) rn,
+                          COUNT(*) OVER (PARTITION BY s.vantage) cnt
+                   FROM seen s JOIN agg a ON a.hash = s.hash)
+        SELECT vantage, lag FROM lags WHERE rn = (cnt + 1) / 2""", q)}
     union_share = _share(uni["public_txs"], tot["txs"])
     per = []
     for v in status:
@@ -393,6 +430,7 @@ def vantages(conn: sqlite3.Connection, p: Params) -> dict[str, Any]:
             "exclusive": r.get("exclusive", 0) or 0,
             "first_seen_share": _share(r.get("first_seen", 0), pub),
             "avg_lag_ms": r.get("avg_lag_ms"),
+            "median_lag_ms": medians.get(v["vantage"]),
         })
     return {
         "vantages": names,
@@ -428,6 +466,7 @@ def _median(xs: list[float]) -> float | None:
 
 def slippage(conn: sqlite3.Connection, p: Params) -> dict[str, Any]:
     """Sandwich rate of public, successful router swaps by quoted slippage tolerance."""
+    _prepare(conn, p)
     rows = conn.execute(ELIGIBLE + """
         , tol AS (SELECT hash, MAX(slippage_tol) tol FROM swap_intent
                   WHERE source = 'mempool' AND slippage_tol IS NOT NULL GROUP BY hash)

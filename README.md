@@ -18,6 +18,12 @@ events, and serves the results through a REST API and a web dashboard.
 
 </details>
 
+<details><summary>Research view: vantage comparison and slippage</summary>
+
+![Research view](docs/screenshot-research.png)
+
+</details>
+
 ---
 
 ## Research questions
@@ -54,9 +60,22 @@ A 12-minute pilot against a free public endpoint (`ethereum-rpc.publicnode.com`,
 | Blocks from the largest builders (Titan, Quasar, BuilderNet), 29 blocks | 39–48% public |
 | Sandwiches detected (all 60 blocks) | 5 |
 
-These numbers only show that the system works: one vantage point and a few minutes
-of data are not enough for conclusions. Comparable results need days of collection
-from several vantage points (see the roadmap below).
+A second 15-minute pilot (4 Nov 2026) ran three collectors on three free providers
+into one database to test the multi-vantage design:
+
+| Vantage | Public share of included txs | Under-estimate vs union | Seen only here | Median lag behind fastest |
+|---|---|---|---|---|
+| All three (union) | 40.0% | – | – | – |
+| publicnode | 38.9% | 1.1 pp | 58 | 254 ms |
+| dRPC | 38.4% | 1.6 pp | 34 | 307 ms |
+| 0xrpc | 36.8% | 3.3 pp | 32 | 522 ms |
+
+48 blocks (11,039 transactions) were covered by all three. 21 of 23 public router
+swaps were quoted when first seen, so slippage tolerance can be measured.
+
+These numbers only show that the system works: free endpoints and minutes of data
+are not enough for conclusions. Comparable results need weeks of collection
+(see [docs/deployment.md](docs/deployment.md)).
 
 ## Architecture
 
@@ -183,7 +202,7 @@ can be changed for sensitivity analysis. Interactive docs are at `/docs`.
 ## Tests
 
 ```bash
-pytest -q                       # 36 tests: decoders, quotes, sandwich heuristic, statistics, migrations, multi-vantage, end-to-end pipeline, API
+pytest -q                       # 38 tests: decoders, quotes, sandwich heuristic, statistics, migrations, multi-vantage, end-to-end pipeline, API
 cd frontend && npm run build    # type-check + production build
 ```
 

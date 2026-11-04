@@ -125,14 +125,15 @@ def _vantage_section(v: dict[str, Any]) -> list[str]:
         f"Blocks observed by all {len(v['vantages'])} vantages: {v['common_blocks']:,} ({v['txs']:,} transactions). "
         f"Union public share: **{_pct(u['public_share'])}**.",
         "",
-        "| Vantage | Endpoint(s) | Public share | Under-estimate vs union | Seen only here | First to see | Mean lag |",
-        "|---|---|---|---|---|---|---|",
+        "| Vantage | Endpoint(s) | Public share | Under-estimate vs union | Seen only here | First to see | Median lag | Mean lag |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for p in v["per_vantage"]:
         under = "n/a" if p["underestimate_pp"] is None else f"{p['underestimate_pp']:.1f} pp"
         lag = "n/a" if p["avg_lag_ms"] is None else f"{p['avg_lag_ms']:.0f} ms"
+        med = "n/a" if p["median_lag_ms"] is None else f"{p['median_lag_ms']:.0f} ms"
         lines.append(f"| {p['vantage']} | {p['endpoints']} | {_pct(p['public_share'])} | {under} | "
-                     f"{p['exclusive']:,} | {_pct(p['first_seen_share'])} | {lag} |")
+                     f"{p['exclusive']:,} | {_pct(p['first_seen_share'])} | {med} | {lag} |")
     return lines + [""]
 
 

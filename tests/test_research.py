@@ -211,3 +211,26 @@ def test_report_includes_research_sections(multi, tmp_path):
     assert "RQ2b" in text and "≥ 5%" in text
     assert "precision **100.0%**" in text
     assert "ETH after gas" in text
+
+
+def test_quick_reconnects_merge_into_one_coverage_period(tmp_path):
+    st = Store(tmp_path / "c.sqlite")
+    for vantage, start, end in [("a", 0, 100_000), ("a", 103_000, 900_000),   # 3 s reconnect -> merged
+                                ("a", 1_000_000, 2_000_000),                  # 100 s gap -> new period
+                                ("b", 0, 2_000_000)]:
+        sid = st.start_session(vantage, "h", 1, "hash", "t")
+        st.conn.execute("UPDATE sessions SET started_ms=?, heartbeat_ms=? WHERE id=?", (start, end, sid))
+    st.commit()
+    periods = A.coverage_periods(st.conn, max_gap_ms=60_000)
+    assert periods == [("a", 0, 900_000), ("a", 1_000_000, 2_000_000), ("b", 0, 2_000_000)]
+    # A block 6 min after the first start but only 3 min after the reconnect is still eligible.
+    st.conn.execute("INSERT INTO blocks(number, timestamp, tx_count) VALUES (1, 360, 0)")
+    st.commit()
+    assert A.overview(st.conn, A.Params())["eligible_blocks"] == 1
+    assert A.overview(st.conn, A.Params(max_gap_ms=1_000))["eligible_blocks"] == 1  # b still covers it
+    assert A.vantages(st.conn, A.Params(max_gap_ms=1_000))["common_blocks"] == 0   # but a does not
+
+
+def test_median_lag(multi):
+    per = {p["vantage"]: p for p in A.vantages(connect(multi), A.Params())["per_vantage"]}
+    assert per["test"]["median_lag_ms"] == 0  # lags 0 and 1500 ms -> lower median

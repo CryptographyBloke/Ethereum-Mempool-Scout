@@ -32,14 +32,14 @@ export function Research({ params }: { params: Params }) {
                 <thead>
                   <tr>
                     <th>Vantage</th><th>Endpoint</th><th>Status</th><th style={{ minWidth: 150 }}>Public share</th>
-                    <th className="num">Under-estimate</th><th className="num">Seen only here</th><th className="num">First to see</th><th className="num">Mean lag</th>
+                    <th className="num">Under-estimate</th><th className="num">Seen only here</th><th className="num">First to see</th><th className="num">Median lag</th><th className="num">Mean lag</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr className="union-row">
                     <td><strong>All (union)</strong></td><td className="muted">–</td><td />
                     <td><div className="bar-cell"><Meter value={v.data.union?.public_share ?? null} label="Union public share" /><span className="num">{pct(v.data.union?.public_share)}</span></div></td>
-                    <td className="num">–</td><td className="num">–</td><td className="num">–</td><td className="num">–</td>
+                    <td className="num">–</td><td className="num">–</td><td className="num">–</td><td className="num">–</td><td className="num">–</td>
                   </tr>
                   {v.data.per_vantage.map((p) => {
                     const active = p.last_heartbeat_ms !== null && Date.now() - p.last_heartbeat_ms < 60_000;
@@ -52,6 +52,7 @@ export function Research({ params }: { params: Params }) {
                         <td className="num">{p.underestimate_pp === null ? "–" : `${p.underestimate_pp.toFixed(1)} pp`}</td>
                         <td className="num">{num(p.exclusive)}</td>
                         <td className="num">{pct(p.first_seen_share)}</td>
+                        <td className="num">{p.median_lag_ms === null ? "–" : `${Math.round(p.median_lag_ms)} ms`}</td>
                         <td className="num">{p.avg_lag_ms === null ? "–" : `${Math.round(p.avg_lag_ms)} ms`}</td>
                       </tr>
                     );
@@ -61,7 +62,8 @@ export function Research({ params }: { params: Params }) {
             </div>
             <p className="muted small">
               <em>Seen only here</em>: public transactions no other vantage saw. <em>First to see</em>: share of this vantage's
-              sightings where it was earliest. <em>Mean lag</em>: average delay behind the fastest vantage.
+              sightings where it was earliest. <em>Lag</em>: delay behind the fastest vantage; the mean is pulled up by
+              transactions one vantage saw much later, so read the median first.
             </p>
           </>
         )}

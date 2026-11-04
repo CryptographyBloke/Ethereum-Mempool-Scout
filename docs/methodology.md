@@ -48,8 +48,14 @@ synchronised with NTP; skew shifts every inclusion delay by the same offset.
 
 ## Definitions
 
-**Eligible block.** A block whose timestamp falls inside some session, at least
-`warmup` after that session started (default 5 min).  Right after start-up the
+**Coverage period.** Consecutive sessions of one vantage separated by at most
+60 s.  Free endpoints drop WebSocket connections every few minutes; a reconnect
+of a few seconds does not empty the recorded view (earlier sightings stay in the
+database), so it should not restart the warm-up.  Transactions broadcast during
+the gap itself are missed by that vantage, which the multi-vantage design covers.
+
+**Eligible block.** A block whose timestamp falls inside some coverage period, at
+least `warmup` after that period started (default 5 min).  Right after start-up the
 local mempool view is empty, which would wrongly classify old pending
 transactions as private.
 
@@ -80,7 +86,7 @@ without WETH have no ETH notional; converting them would need price data.
 ## Comparing vantage points (RQ1b)
 
 The comparison uses only **common blocks**: blocks whose timestamp lies inside a
-warmed-up session of *every* vantage.  On those blocks, with `U` the set of
+warmed-up coverage period of *every* vantage.  On those blocks, with `U` the set of
 transactions seen publicly by at least one vantage:
 
 * **Union share** `|U| / txs`, the best available estimate of public visibility;
@@ -89,7 +95,9 @@ transactions seen publicly by at least one vantage:
   of a single-vantage study;
 * **Exclusive** sightings: transactions only `v` saw publicly;
 * **First to see**: share of `v`'s public sightings where `v` was earliest;
-* **Mean lag**: mean of `first_seen(v) − min over vantages(first_seen)`.
+* **Lag**: median and mean of `first_seen(v) − min over vantages(first_seen)`.
+  The mean is sensitive to transactions one vantage saw minutes later (for
+  example after re-broadcasts), so the median is the primary statistic.
 
 ## Slippage tolerance (RQ2b)
 

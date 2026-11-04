@@ -104,14 +104,14 @@ export function App() {
               {[0, 1000, 2000, 4000].map((v) => <option key={v} value={v}>{v / 1000} s</option>)}
             </select>
           </label>
-          <span className="muted small">A transaction is <em>public</em> if this node saw its hash before the block timestamp (+ grace).</span>
+          <span className="muted small">A transaction is <em>public</em> if any vantage point saw its hash before the block timestamp (+ grace).</span>
         </div>
       )}
 
       <main>{body}</main>
 
       <footer className="muted small">
-        Read-only research tool · data from a single vantage point; see <a href="https://github.com/CryptographyBloke/Ethereum-Mempool-Scout/blob/main/docs/methodology.md" target="_blank" rel="noreferrer">methodology</a> for definitions and limitations.
+        Read-only research tool · data from the vantage points listed under Research; see <a href="https://github.com/CryptographyBloke/Ethereum-Mempool-Scout/blob/main/docs/methodology.md" target="_blank" rel="noreferrer">methodology</a> for definitions and limitations.
       </footer>
     </div>
   );

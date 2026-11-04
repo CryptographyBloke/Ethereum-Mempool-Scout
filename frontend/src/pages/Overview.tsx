@@ -49,7 +49,7 @@ export function Overview({ params, live }: { params: Params; live: LiveState }) 
           {o.eligible_blocks > 0 ? (
             <p className="muted">
               {num(o.public_txs)} of {num(o.txs)} transactions in {num(o.eligible_blocks)} observed blocks. The rest reached
-              builders privately (or never reached this node).
+              builders privately (or never reached any vantage point).
             </p>
           ) : (
             <p className="notice">

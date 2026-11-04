@@ -195,6 +195,7 @@ export interface VantageStat {
   exclusive: number;
   first_seen_share: number | null;
   avg_lag_ms: number | null;
+  median_lag_ms: number | null;
 }
 
 export interface VantageReport {

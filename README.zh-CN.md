@@ -48,7 +48,7 @@ mempool-scout report  --db data/scout.sqlite --out reports
 ## 测试
 
 ```bash
-pytest -q                      # 36 个测试：解码、三明治识别、统计方法、端到端流程、API
+pytest -q                      # 38 个测试：解码、三明治识别、统计方法、端到端流程、API
 cd frontend && npm run build   # 类型检查 + 构建
 ```
 
