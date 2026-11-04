@@ -1,0 +1,7 @@
+.git
+data
+reports
+frontend/node_modules
+frontend/dist
+**/__pycache__
+*.sqlite*

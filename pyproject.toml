@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mempool-scout"
+version = "2.0.0"
+description = "Measure Ethereum public-mempool visibility, private order flow and sandwich-attack exposure."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "CryptographyBloke" }]
+keywords = ["ethereum", "mempool", "mev", "sandwich-attack", "defi", "measurement"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = [
+  "eth-abi>=5.0",
+  "eth-utils>=4.0",
+  "eth-hash[pycryptodome]>=0.5",
+  "websockets>=13.0",
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.29",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+mempool-scout = "mempool_scout.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mempool_scout*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

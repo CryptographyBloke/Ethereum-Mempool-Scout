@@ -1,174 +1,201 @@
-# 🔭 Ethereum Mempool Scout
+# Ethereum Mempool Scout
 
-以太坊 Mempool 实时侦察工具，基于 `web3.py` 异步 WebSocket 订阅，监控链上大额 Uniswap V2 Swap 交易与新合约部署事件。
+**A measurement system for Ethereum transaction privacy and MEV.**
+Mempool Scout records when transactions appear in the public mempool, matches them
+against the blocks that include them, detects sandwich attacks from on-chain swap
+events, and serves the results through a REST API and a web dashboard.
 
----
+[![CI](https://github.com/CryptographyBloke/Ethereum-Mempool-Scout/actions/workflows/ci.yml/badge.svg)](https://github.com/CryptographyBloke/Ethereum-Mempool-Scout/actions/workflows/ci.yml)
+· Python 3.10+ · React + TypeScript · FastAPI · SQLite · MIT
 
-## 功能特性
+[中文说明](README.zh-CN.md) · [Methodology](docs/methodology.md)
 
-- **实时 Pending 交易监听** — 通过 WebSocket 订阅 `newPendingTransactions`，在交易被打包进区块之前捕获
-- **Uniswap V2 大额 Swap 检测** — 自动解码发往 V2 Router 的 5 种 swap 函数，超过阈值（默认 10 ETH）立即告警
-- **新合约部署监控** — 捕获所有 `to == null` 的部署交易，显示部署者、字节码大小和 Gas 信息
-- **高并发无阻塞** — 每条交易哈希通过 `asyncio.create_task` 独立调度，信号量限制最大 200 路并发
-- **定期统计报告** — 每 30 秒打印处理数量、命中数、错误数汇总
-- **优雅退出** — `Ctrl+C` 后输出最终统计并干净退出
+![Dashboard overview](docs/screenshot-overview.png)
 
----
+<details><summary>Blocks view</summary>
 
-## 环境要求
+![Blocks view](docs/screenshot-blocks.png)
 
-| 项目 | 版本 |
-|------|------|
-| Python | ≥ 3.10 |
-| web3.py | ≥ 7.0（已测试 7.16.0）|
+</details>
 
 ---
 
-## 快速开始
+## Research questions
 
-### 1. 安装依赖
+Since the move to proposer–builder separation, a growing share of Ethereum order
+flow bypasses the public mempool and goes straight to block builders. This project
+measures that shift and its security consequences:
+
+| | Question | Output |
+|---|---|---|
+| **RQ1** | What share of included transactions was visible in the public mempool before inclusion? How does it vary by transaction type and builder? | public share, inclusion-delay distribution, per-builder table |
+| **RQ2** | Are publicly visible Uniswap swaps sandwiched more often than private ones? | sandwich rate per group with 95% Wilson CIs, relative risk, two-proportion z-test |
+| **RQ3** | How concentrated is block building, and which builders rely on private flow? | block share and public share per builder |
+
+Definitions, statistics, threats to validity and related work are in
+[docs/methodology.md](docs/methodology.md).
+
+## Pilot run
+
+A 12-minute pilot against a free public endpoint (`ethereum-rpc.publicnode.com`,
+3 Nov 2026) checked the whole pipeline on mainnet:
+
+| Metric (5-min warm-up, 0 s grace) | Value |
+|---|---|
+| Collection window | 3 Nov 2026, 15:11–15:23 UTC (1 session, 1 vantage point) |
+| Pending hashes recorded | 9,312 |
+| Eligible blocks / included transactions | 34 / 9,969 |
+| Included transactions seen publicly first | 46.2% |
+| Uniswap router swaps seen publicly first | 13.1% (8 of 61) |
+| Inclusion delay of public transactions | median 6.6 s, p90 11.4 s |
+| Blocks with a plain client tag (geth) or no tag, 4 blocks | 95–100% public |
+| Blocks from the largest builders (Titan, Quasar, BuilderNet), 29 blocks | 39–48% public |
+| Sandwiches detected (all 60 blocks) | 5 |
+
+These numbers only show that the system works: one vantage point and a few minutes
+of data are not enough for conclusions. Comparable results need days of collection
+from several vantage points (see the roadmap below).
+
+## Architecture
+
+```mermaid
+flowchart LR
+    node[(Ethereum node<br/>WebSocket)] -- newPendingTransactions --> C
+    node -- newHeads + receipts --> C
+    subgraph Backend [Python backend]
+        C[Collector<br/>asyncio · bounded workers<br/>auto-reconnect] --> D[Decoders<br/>V2 · V3 · Universal Router]
+        C --> S[Sandwich detector<br/>pool Swap events]
+        C --> DB[(SQLite WAL<br/>sessions · pending_tx · blocks<br/>block_tx · pool_swap · sandwiches)]
+        DB --> A[Analysis<br/>visibility · delay · exposure<br/>Wilson CI · z-test]
+        A --> API[FastAPI<br/>REST + Server-Sent Events]
+        A --> R[Report<br/>Markdown + JSON]
+    end
+    API --> UI[React + TypeScript dashboard<br/>SVG charts · live feed]
+```
+
+| Component | File | Notes |
+|---|---|---|
+| WebSocket JSON-RPC client | `mempool_scout/rpc.py` | Small custom client: exact subscription params, 256 MiB frames, per-subscription queues |
+| Collector | `mempool_scout/collector.py` | Timestamps every pending hash immediately; bounded fetch queue; retries when nodes lag behind a load balancer; re-org-safe block replacement |
+| Swap decoders | `mempool_scout/decoders.py` | 11 V2 functions, 8 V3 functions, `multicall`, Universal Router commands; measures size on the WETH side |
+| Sandwich detector | `mempool_scout/sandwich.py` | Works on executed V2/V3 `Swap` logs, so it also covers bots that call pools through their own contracts |
+| Storage | `mempool_scout/storage.py` | SQLite in WAL mode: one writer (collector), many readers (API, report) |
+| Analysis | `mempool_scout/analysis.py` | One SQL layer shared by the dashboard and the report |
+| API | `mempool_scout/api.py` | 14 endpoints + `/api/stream` SSE; OpenAPI docs at `/docs` |
+| Dashboard | `frontend/` | React 18 + TypeScript + Vite; light/dark themes; every chart has a table view |
+
+## Quick start
+
+### 1. Get a WebSocket endpoint
+
+Any Ethereum mainnet node with `eth_subscribe` and `eth_getBlockReceipts`:
+Alchemy, Infura, QuickNode, Chainstack, or your own geth/reth/erigon node
+(`ws://127.0.0.1:8546`). A self-hosted node with many peers gives the most
+complete mempool view.
+
+### 2. Run with Docker
 
 ```bash
-pip install web3
+export SCOUT_WSS_URL="wss://eth-mainnet.g.alchemy.com/v2/<YOUR_KEY>"
+docker compose up --build
 ```
 
-### 2. 获取 WebSocket 节点 URL
+Open http://localhost:8000. The collector and the API run as separate containers
+sharing one SQLite volume.
 
-需要一个支持 WebSocket 的以太坊全节点接入地址。以下提供商均有**免费套餐**：
-
-| 提供商 | WebSocket 地址格式 |
-|--------|-------------------|
-| [Alchemy](https://www.alchemy.com/) | `wss://eth-mainnet.g.alchemy.com/v2/<YOUR_KEY>` |
-| [Infura](https://www.infura.io/) | `wss://mainnet.infura.io/ws/v3/<YOUR_KEY>` |
-| [QuickNode](https://www.quicknode.com/) | `wss://<YOUR_ENDPOINT>.quiknode.pro/<YOUR_KEY>/` |
-| [Chainstack](https://www.chainstack.com/) | `wss://nd-xxx.p2pify.com/<YOUR_KEY>` |
-| 自建节点 (geth/erigon) | `ws://127.0.0.1:8546` |
-
-### 3. 配置节点地址
-
-打开 `scout.py`，将顶部的占位符替换为你的真实地址：
-
-```python
-# 修改前
-WSS_NODE_URL = "wss://YOUR_NODE_URL_HERE"
-
-# 修改后（示例）
-WSS_NODE_URL = "wss://eth-mainnet.g.alchemy.com/v2/abcd1234efgh5678"
-```
-
-### 4. 启动运行
+### 3. Or run locally
 
 ```bash
-python3 scout.py
+pip install -e ".[dev]"
+export SCOUT_WSS_URL="wss://..."
+
+mempool-scout collect --db data/scout.sqlite --vantage home-node   # terminal 1
+mempool-scout serve   --db data/scout.sqlite                       # terminal 2
+
+cd frontend && npm install && npm run dev                          # terminal 3 → http://localhost:5173
 ```
 
-正常启动后，终端会显示：
+Run `npm run build` in `frontend/` once and `mempool-scout serve` will also serve the
+built dashboard at http://127.0.0.1:8000.
 
-```
-============================================================
-  🔭 Ethereum Mempool Scout 启动中…
-  节点       : wss://eth-mainnet.g.alchemy.com/v2/abcd…
-  监控路由器  : 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D
-  大额阈值    : 10 ETH
-============================================================
-✅ 已连接  Chain ID=1  当前区块=21,847,302
+### 4. Produce a report
 
-📡 已订阅 pendingTransactions  subscription_id=0x...
+```bash
+mempool-scout report --db data/scout.sqlite --out reports --warmup-min 5 --grace-ms 0
 ```
 
----
+This writes `reports/report.md` (tables for RQ1–RQ3) and `reports/report.json`
+(all numbers, for notebooks and plots).
 
-## 输出示例
+## Command reference
 
-**大额 Swap 告警：**
-```
-[14:32:07.841] 💱 大额 Swap 检测！
-         函数       : swapExactTokensForETH
-         卖出数量   : 15.3200 ETH
-         最小获得   : 14.9800 ETH
-         兑换路径   : 0xC02a…WETH → 0xA0b8…USDC
-         发送者     : 0xd8dA…6045
-         Gas Price  : 23 Gwei
-         Hash       : 0x4fa71c3b8e2d09a1…
-```
+| Command | Purpose | Main options |
+|---|---|---|
+| `mempool-scout collect` | Stream mempool + blocks into SQLite | `--wss`, `--db`, `--vantage`, `--fetch-mode {full,hash}`, `--full-pending-objects`, `--workers`, `--large-swap-eth`, `--router ADDR=LABEL`, `--no-receipts` |
+| `mempool-scout serve` | REST API + dashboard | `--db`, `--host`, `--port` |
+| `mempool-scout report` | Markdown + JSON report | `--db`, `--out`, `--warmup-min`, `--grace-ms` |
 
-**新合约部署：**
-```
-[14:33:15.012] 🚀 新合约部署  发送者=0xd8dA…6045  字节码长度=4821 bytes  Gas=800,000  Nonce=47  Hash=0x9c2b1a4f7e3d…
-```
+`--fetch-mode hash` only timestamps hashes. That is enough for RQ1 and uses about
+1% of the RPC calls, so it suits free-tier endpoints.
 
-**定期统计：**
-```
-[14:40:07.000] 📊 统计 | 已处理=12,483  大额Swap=7  新合约=23  错误=41
-```
+## API
 
----
+| Endpoint | Returns |
+|---|---|
+| `GET /api/overview` | headline metrics (RQ1–RQ3) |
+| `GET /api/visibility/timeseries?bucket_s=3600` | public share per time bucket |
+| `GET /api/visibility/types` · `/api/visibility/delay` | by transaction type · inclusion-delay histogram |
+| `GET /api/exposure` | RQ2 rates, CIs, z-test |
+| `GET /api/builders` | per-builder statistics |
+| `GET /api/blocks` · `/api/blocks/{n}` | recent blocks · one block with per-tx visibility and sandwich roles |
+| `GET /api/sandwiches` · `/api/swaps/large` | detected sandwiches · large pending swaps |
+| `GET /api/tx/{hash}` | everything known about one transaction |
+| `GET /api/stream` | Server-Sent Events: `block` and `alert` |
 
-## 配置项说明
+All analytical endpoints accept `warmup_min` and `grace_ms`, so the definitions
+can be changed for sensitivity analysis. Interactive docs are at `/docs`.
 
-所有配置集中在 `scout.py` 顶部的配置区：
+## Data model
 
-```python
-WSS_NODE_URL            = "wss://..."   # WebSocket 节点地址
-UNISWAP_V2_ROUTER       = "0x7a25..."  # Uniswap V2 Router 合约地址（一般无需修改）
-LARGE_SWAP_THRESHOLD_ETH = 10          # 大额 Swap 告警阈值（ETH）
-MAX_CONCURRENT_TASKS     = 200         # 最大并发解析任务数
-```
+| Table | One row per | Key columns |
+|---|---|---|
+| `sessions` | collector connection | `started_ms`, `heartbeat_ms`, `vantage`, `endpoint_host` |
+| `pending_tx` | hash seen in the mempool | `first_seen_ms`, fees, `is_deploy` |
+| `swap_intent` | decoded swap (mempool or block) | `function`, `token_in/out`, amounts, `eth_notional` |
+| `blocks` | block | `timestamp`, `builder_tag`, `fee_recipient`, `base_fee` |
+| `block_tx` | included transaction | `tx_index`, `status`, `priority_fee_gwei`, `is_router_swap` |
+| `pool_swap` | Uniswap V2/V3 `Swap` event | `pool`, `amount0`, `amount1` (signed, pool view) |
+| `sandwiches` | (victim, pool) | `front_hash`, `back_hash`, `attacker`, `gross_profit_eth` |
 
----
+## Tests
 
-## 监控的 Uniswap V2 函数
-
-| 函数名 | 说明 |
-|--------|------|
-| `swapExactTokensForETH` | 卖出精确数量的 Token，换取 ETH |
-| `swapExactETHForTokens` | 卖出精确数量的 ETH，换取 Token |
-| `swapExactTokensForTokens` | Token 对 Token 精确输入兑换 |
-| `swapTokensForExactETH` | 换取精确数量的 ETH，输入 Token |
-| `swapETHForExactTokens` | 换取精确数量的 Token，输入 ETH |
-
----
-
-## 工作原理
-
-```
-以太坊节点
-    │  WebSocket 推送 pending tx hash
-    ▼
-scout.py 主循环
-    │  asyncio.create_task()  ← 非阻塞，立即返回继续监听
-    ▼
-parse_tx()（并发执行，最多 200 个）
-    ├─ eth_getTransaction(hash)   ← RPC 异步调用
-    ├─ 判断 to == null            → 打印合约部署
-    └─ 判断 to == UniswapV2Router → ABI 解码 input → 判断金额 → 打印 Swap
+```bash
+pytest -q                       # 21 tests: decoders, sandwich heuristic, statistics, end-to-end pipeline, API
+cd frontend && npm run build    # type-check + production build
 ```
 
----
+The end-to-end test runs the real collector against a simulated node: block,
+receipts, a sandwich and mempool sightings go through the database, analysis,
+report and every API endpoint.
 
-## 常见问题
+## Roadmap
 
-**Q: 启动后没有任何输出？**  
-A: Mempool 数据量大，但大额交易相对稀少。可以先把 `LARGE_SWAP_THRESHOLD_ETH` 调低（如改为 `0.1`）来验证数据流是否正常。
+- [ ] Multi-vantage collection and per-vantage comparison (self-hosted node vs hosted RPCs)
+- [ ] Uniswap V4, Curve, Balancer and aggregator decoding
+- [ ] Validate sandwich labels against a public MEV dataset; measure precision/recall
+- [ ] Net profit: subtract gas and coinbase transfers
+- [ ] Slippage-tolerance analysis: does a looser `amountOutMin` predict being sandwiched?
+- [ ] Export to Parquet and analysis notebooks with publication-quality figures
+- [ ] Write-up of a multi-week measurement
 
-**Q: 提示 `无法连接到节点`？**  
-A: 检查 `WSS_NODE_URL` 是否正确，以及节点提供商的 API Key 是否有效。注意地址必须以 `wss://` 开头，不是 `https://`。
+## Ethics
 
-**Q: 错误计数很高？**  
-A: 属于正常现象。Pending 交易中有相当一部分会在查询前被丢弃或已被打包，`eth_getTransaction` 返回空是预期行为，这类错误已被静默过滤。
+Read-only. The tool never signs or sends transactions and only processes data the
+Ethereum network makes public. See [methodology](docs/methodology.md#ethics).
 
-**Q: 如何同时监控多个 DEX？**  
-A: 在 `parse_tx` 函数中增加对其他路由合约地址（如 Uniswap V3、Curve、1inch 等）的判断分支，并为每个合约加载对应 ABI 即可。
+## Citation
 
----
-
-## 注意事项
-
-- 本工具仅作**只读监控**用途，不会发送任何交易
-- Mempool 数据量极大（主网每秒可达数百笔），请确保节点提供商的 API 调用额度充足
-- 本工具不构成任何投资或交易建议
-
----
+If you use this software, please cite it via [CITATION.cff](CITATION.cff).
 
 ## License
 
