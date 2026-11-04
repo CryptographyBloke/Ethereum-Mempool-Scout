@@ -16,5 +16,5 @@ COPY --from=web /web/dist ./frontend/dist
 ENV SCOUT_DB=/data/scout.sqlite
 VOLUME ["/data"]
 EXPOSE 8000
-ENTRYPOINT ["mempool-scout"]
-CMD ["serve", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["python", "-m", "mempool_scout.process_manager"]
+CMD ["all"]
