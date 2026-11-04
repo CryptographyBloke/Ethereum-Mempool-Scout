@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useI18n } from "../i18n";
 
 /* Shared chart primitives.  Marks follow one spec everywhere: 2px lines, columns
  * <= 24px with a 4px rounded data-end, >= 8px markers with a 2px surface ring,
@@ -230,6 +231,7 @@ export function RateCompare({ groups, ariaLabel }: {
   groups: { label: string; rate: number | null; ci: [number, number] | null; detail: string }[];
   ariaLabel: string;
 }) {
+  const { t } = useI18n();
   const [ref, width] = useWidth<HTMLDivElement>();
   const [hover, setHover] = useState<number | null>(null);
   const rowH = 44;
@@ -274,7 +276,7 @@ export function RateCompare({ groups, ariaLabel }: {
                     <text x={sx(g.rate)} y={cy - 12} className="tick strong" textAnchor="middle">{pct1(g.rate)}</text>
                   </>
                 )}
-                {g.rate === null && <text x={m.l} y={cy} className="tick" dominantBaseline="middle">no data</text>}
+                {g.rate === null && <text x={m.l} y={cy} className="tick" dominantBaseline="middle">{t("no data")}</text>}
               </g>
             );
           })}
@@ -295,10 +297,11 @@ const pct1 = (v: number) => `${(v * 100).toFixed(1)}%`;
 
 /* ── Thin segmented bar: public vs private share of one block ───────────── */
 export function SplitBar({ share, label }: { share: number | null; label: string }) {
+  const { t } = useI18n();
   if (share === null) return <span className="muted">–</span>;
   const pub = Math.round(share * 1000) / 10;
   return (
-    <div className="splitbar" role="img" aria-label={`${label}: ${pub}% public, ${(100 - pub).toFixed(1)}% private`} title={`${pub}% public · ${(100 - pub).toFixed(1)}% private`}>
+    <div className="splitbar" role="img" aria-label={`${label}: ${pub}% ${t("public")}, ${(100 - pub).toFixed(1)}% ${t("private")}`} title={`${pub}% ${t("public")} · ${(100 - pub).toFixed(1)}% ${t("private")}`}>
       {pub > 0 && <span style={{ width: `${pub}%`, background: "var(--series-1)" }} />}
       {pub < 100 && <span style={{ width: `${100 - pub}%`, background: "var(--series-2)" }} />}
     </div>
