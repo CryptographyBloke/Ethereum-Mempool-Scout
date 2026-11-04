@@ -196,3 +196,18 @@ def test_research_endpoints(multi):
 def test_sqlite_supports_drop_column():
     # The migration test relies on ALTER TABLE ... DROP COLUMN (SQLite >= 3.35).
     assert sqlite3.sqlite_version_info >= (3, 35, 0)
+
+
+def test_report_includes_research_sections(multi, tmp_path):
+    from mempool_scout.report import write_report
+
+    labels = tmp_path / "labels.csv"
+    rows = A.label_sample(connect(multi), n=5)
+    for r in rows:
+        r["label"] = "TP"
+    A.write_label_csv(rows, str(labels))
+    text = write_report(multi, tmp_path / "out", A.Params(), labels=str(labels)).read_text()
+    assert "RQ1b" in text and "25.0 pp" in text          # 'test' vantage misses 1 of 4 vs union
+    assert "RQ2b" in text and "≥ 5%" in text
+    assert "precision **100.0%**" in text
+    assert "ETH after gas" in text

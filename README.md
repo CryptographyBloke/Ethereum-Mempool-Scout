@@ -183,7 +183,7 @@ can be changed for sensitivity analysis. Interactive docs are at `/docs`.
 ## Tests
 
 ```bash
-pytest -q                       # 34 tests: decoders, quotes, sandwich heuristic, statistics, migrations, multi-vantage, end-to-end pipeline, API
+pytest -q                       # 36 tests: decoders, quotes, sandwich heuristic, statistics, migrations, multi-vantage, end-to-end pipeline, API
 cd frontend && npm run build    # type-check + production build
 ```
 
