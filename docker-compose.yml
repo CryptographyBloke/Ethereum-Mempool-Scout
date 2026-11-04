@@ -1,13 +1,27 @@
-# Usage:
-#   export SCOUT_WSS_URL=wss://eth-mainnet.g.alchemy.com/v2/<key>
-#   docker compose up --build
-# Dashboard: http://localhost:8000
+# One collector (ingests blocks + mempool):
+#   cp .env.example .env    # then put your endpoint(s) in .env
+#   docker compose up -d --build
+# Two vantage points (adds a mempool-only collector on a second provider):
+#   docker compose --profile multi up -d --build
+#
+# The dashboard listens on 127.0.0.1:8000 only. From your laptop:
+#   ssh -L 8000:localhost:8000 user@your-vps   ->  http://localhost:8000
 services:
   collector:
     build: .
-    command: ["collect", "--vantage", "${SCOUT_VANTAGE:-docker}"]
+    command: ["collect", "--vantage", "${SCOUT_VANTAGE:-primary}"]
     environment:
-      SCOUT_WSS_URL: ${SCOUT_WSS_URL:?set SCOUT_WSS_URL to a WebSocket endpoint}
+      SCOUT_WSS_URL: ${SCOUT_WSS_URL:?set SCOUT_WSS_URL in .env}
+      SCOUT_DB: /data/scout.sqlite
+    volumes: ["scout-data:/data"]
+    restart: unless-stopped
+
+  collector-b:
+    build: .
+    profiles: ["multi"]
+    command: ["collect", "--mempool-only", "--fetch-mode", "hash", "--vantage", "${SCOUT_VANTAGE_B:-secondary}"]
+    environment:
+      SCOUT_WSS_URL: ${SCOUT_WSS_URL_B:-}
       SCOUT_DB: /data/scout.sqlite
     volumes: ["scout-data:/data"]
     restart: unless-stopped
@@ -18,7 +32,7 @@ services:
     environment:
       SCOUT_DB: /data/scout.sqlite
     volumes: ["scout-data:/data"]
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]
     depends_on: [collector]
     restart: unless-stopped
 

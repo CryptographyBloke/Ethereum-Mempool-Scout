@@ -8,13 +8,19 @@ events, and serves the results through a REST API and a web dashboard.
 [![CI](https://github.com/CryptographyBloke/Ethereum-Mempool-Scout/actions/workflows/ci.yml/badge.svg)](https://github.com/CryptographyBloke/Ethereum-Mempool-Scout/actions/workflows/ci.yml)
 · Python 3.10+ · React + TypeScript · FastAPI · SQLite · MIT
 
-[中文说明](README.zh-CN.md) · [Methodology](docs/methodology.md)
+[中文说明](README.zh-CN.md) · [Methodology](docs/methodology.md) · [Running a campaign on a VPS](docs/deployment.md)
 
 ![Dashboard overview](docs/screenshot-overview.png)
 
 <details><summary>Blocks view</summary>
 
 ![Blocks view](docs/screenshot-blocks.png)
+
+</details>
+
+<details><summary>Research view: vantage comparison and slippage</summary>
+
+![Research view](docs/screenshot-research.png)
 
 </details>
 
@@ -29,7 +35,9 @@ measures that shift and its security consequences:
 | | Question | Output |
 |---|---|---|
 | **RQ1** | What share of included transactions was visible in the public mempool before inclusion? How does it vary by transaction type and builder? | public share, inclusion-delay distribution, per-builder table |
+| **RQ1b** | How much does a single vantage point under-estimate public visibility? | per-vantage share vs the union of all vantages, exclusive sightings, propagation lag |
 | **RQ2** | Are publicly visible Uniswap swaps sandwiched more often than private ones? | sandwich rate per group with 95% Wilson CIs, relative risk, two-proportion z-test |
+| **RQ2b** | Among public swaps, does a looser slippage tolerance predict being sandwiched? | swaps quoted when first seen; sandwich rate per tolerance band; tight-vs-loose test |
 | **RQ3** | How concentrated is block building, and which builders rely on private flow? | block share and public share per builder |
 
 Definitions, statistics, threats to validity and related work are in
@@ -52,9 +60,22 @@ A 12-minute pilot against a free public endpoint (`ethereum-rpc.publicnode.com`,
 | Blocks from the largest builders (Titan, Quasar, BuilderNet), 29 blocks | 39–48% public |
 | Sandwiches detected (all 60 blocks) | 5 |
 
-These numbers only show that the system works: one vantage point and a few minutes
-of data are not enough for conclusions. Comparable results need days of collection
-from several vantage points (see the roadmap below).
+A second 15-minute pilot (4 Nov 2026) ran three collectors on three free providers
+into one database to test the multi-vantage design:
+
+| Vantage | Public share of included txs | Under-estimate vs union | Seen only here | Median lag behind fastest |
+|---|---|---|---|---|
+| All three (union) | 40.0% | – | – | – |
+| publicnode | 38.9% | 1.1 pp | 58 | 254 ms |
+| dRPC | 38.4% | 1.6 pp | 34 | 307 ms |
+| 0xrpc | 36.8% | 3.3 pp | 32 | 522 ms |
+
+48 blocks (11,039 transactions) were covered by all three. 21 of 23 public router
+swaps were quoted when first seen, so slippage tolerance can be measured.
+
+These numbers only show that the system works: free endpoints and minutes of data
+are not enough for conclusions. Comparable results need weeks of collection
+(see [docs/deployment.md](docs/deployment.md)).
 
 ## Architecture
 
@@ -76,12 +97,13 @@ flowchart LR
 | Component | File | Notes |
 |---|---|---|
 | WebSocket JSON-RPC client | `mempool_scout/rpc.py` | Small custom client: exact subscription params, 256 MiB frames, per-subscription queues |
-| Collector | `mempool_scout/collector.py` | Timestamps every pending hash immediately; bounded fetch queue; retries when nodes lag behind a load balancer; re-org-safe block replacement |
+| Collector | `mempool_scout/collector.py` | Timestamps every pending hash immediately; bounded fetch queue; retries when nodes lag behind a load balancer; re-org-safe block replacement; several collectors (vantage points) can share one database |
+| Swap quoting | `mempool_scout/quotes.py` | Prices each public swap when first seen (V2 `getAmountsOut`, V3 QuoterV2) to measure the user's slippage tolerance |
 | Swap decoders | `mempool_scout/decoders.py` | 11 V2 functions, 8 V3 functions, `multicall`, Universal Router commands; measures size on the WETH side |
-| Sandwich detector | `mempool_scout/sandwich.py` | Works on executed V2/V3 `Swap` logs, so it also covers bots that call pools through their own contracts |
-| Storage | `mempool_scout/storage.py` | SQLite in WAL mode: one writer (collector), many readers (API, report) |
+| Sandwich detector | `mempool_scout/sandwich.py` | Works on executed V2/V3 `Swap` logs, so it also covers bots that call pools through their own contracts; gross and net-of-gas profit; precision measured from a labelled sample |
+| Storage | `mempool_scout/storage.py` | SQLite in WAL mode shared by several collectors and readers; versioned schema with automatic migration |
 | Analysis | `mempool_scout/analysis.py` | One SQL layer shared by the dashboard and the report |
-| API | `mempool_scout/api.py` | 14 endpoints + `/api/stream` SSE; OpenAPI docs at `/docs` |
+| API | `mempool_scout/api.py` | 16 endpoints + `/api/stream` SSE; OpenAPI docs at `/docs` |
 | Dashboard | `frontend/` | React 18 + TypeScript + Vite; light/dark themes; every chart has a table view |
 
 ## Quick start
@@ -96,12 +118,14 @@ complete mempool view.
 ### 2. Run with Docker
 
 ```bash
-export SCOUT_WSS_URL="wss://eth-mainnet.g.alchemy.com/v2/<YOUR_KEY>"
-docker compose up --build
+cp .env.example .env        # put your endpoint(s) in .env
+docker compose up --build                     # one vantage point
+docker compose --profile multi up --build     # plus a second provider
 ```
 
-Open http://localhost:8000. The collector and the API run as separate containers
-sharing one SQLite volume.
+Open http://localhost:8000. Collectors and the API run as separate containers
+sharing one SQLite volume. For a multi-week campaign on a server, follow
+[docs/deployment.md](docs/deployment.md).
 
 ### 3. Or run locally
 
@@ -132,8 +156,12 @@ This writes `reports/report.md` (tables for RQ1–RQ3) and `reports/report.json`
 | Command | Purpose | Main options |
 |---|---|---|
 | `mempool-scout collect` | Stream mempool + blocks into SQLite | `--wss`, `--db`, `--vantage`, `--fetch-mode {full,hash}`, `--full-pending-objects`, `--workers`, `--large-swap-eth`, `--router ADDR=LABEL`, `--no-receipts` |
+| `mempool-scout collect --mempool-only` | Extra vantage point: record sightings only | `--vantage`, `--fetch-mode hash` |
 | `mempool-scout serve` | REST API + dashboard | `--db`, `--host`, `--port` |
-| `mempool-scout report` | Markdown + JSON report | `--db`, `--out`, `--warmup-min`, `--grace-ms` |
+| `mempool-scout report` | Markdown + JSON report | `--db`, `--out`, `--warmup-min`, `--grace-ms`, `--labels` |
+| `mempool-scout status` | Per-vantage heartbeat, head block, database size | `--db` |
+| `mempool-scout backup` | Consistent copy while collectors run | `--db`, `--out` |
+| `mempool-scout label-sample` / `validate` | Export detections for manual labelling / compute detector precision | `--n`, `--seed`, `--out` / `labels.csv` |
 
 `--fetch-mode hash` only timestamps hashes. That is enough for RQ1 and uses about
 1% of the RPC calls, so it suits free-tier endpoints.
@@ -146,6 +174,9 @@ This writes `reports/report.md` (tables for RQ1–RQ3) and `reports/report.json`
 | `GET /api/visibility/timeseries?bucket_s=3600` | public share per time bucket |
 | `GET /api/visibility/types` · `/api/visibility/delay` | by transaction type · inclusion-delay histogram |
 | `GET /api/exposure` | RQ2 rates, CIs, z-test |
+| `GET /api/vantages` | RQ1b: per-vantage share, under-estimate vs union, exclusive sightings, lag |
+| `GET /api/slippage` | RQ2b: sandwich rate per slippage-tolerance band |
+| `GET /api/health` | per-vantage heartbeat for uptime monitoring |
 | `GET /api/builders` | per-builder statistics |
 | `GET /api/blocks` · `/api/blocks/{n}` | recent blocks · one block with per-tx visibility and sandwich roles |
 | `GET /api/sandwiches` · `/api/swaps/large` | detected sandwiches · large pending swaps |
@@ -160,8 +191,9 @@ can be changed for sensitivity analysis. Interactive docs are at `/docs`.
 | Table | One row per | Key columns |
 |---|---|---|
 | `sessions` | collector connection | `started_ms`, `heartbeat_ms`, `vantage`, `endpoint_host` |
-| `pending_tx` | hash seen in the mempool | `first_seen_ms`, fees, `is_deploy` |
-| `swap_intent` | decoded swap (mempool or block) | `function`, `token_in/out`, amounts, `eth_notional` |
+| `pending_sighting` | (hash, vantage) | `first_seen_ms` per vantage point |
+| `pending_tx` | hash seen in the mempool | earliest `first_seen_ms` over vantages, fees, `is_deploy` |
+| `swap_intent` | decoded swap (mempool or block) | `function`, `token_in/out`, amounts, `eth_notional`, `quote_out`, `slippage_tol` |
 | `blocks` | block | `timestamp`, `builder_tag`, `fee_recipient`, `base_fee` |
 | `block_tx` | included transaction | `tx_index`, `status`, `priority_fee_gwei`, `is_router_swap` |
 | `pool_swap` | Uniswap V2/V3 `Swap` event | `pool`, `amount0`, `amount1` (signed, pool view) |
@@ -170,7 +202,7 @@ can be changed for sensitivity analysis. Interactive docs are at `/docs`.
 ## Tests
 
 ```bash
-pytest -q                       # 21 tests: decoders, sandwich heuristic, statistics, end-to-end pipeline, API
+pytest -q                       # 38 tests: decoders, quotes, sandwich heuristic, statistics, migrations, multi-vantage, end-to-end pipeline, API
 cd frontend && npm run build    # type-check + production build
 ```
 
@@ -180,13 +212,15 @@ report and every API endpoint.
 
 ## Roadmap
 
-- [ ] Multi-vantage collection and per-vantage comparison (self-hosted node vs hosted RPCs)
+- [x] Multi-vantage collection and per-vantage comparison
+- [x] Slippage-tolerance analysis: does a looser `amountOutMin` predict being sandwiched?
+- [x] Detector precision from a labelled sample (`label-sample`, `validate`)
+- [x] Net profit after gas
+- [ ] Multi-week campaign on a VPS with 2+ vantage points ([guide](docs/deployment.md))
+- [ ] Coinbase transfers via execution traces (net profit after builder payments)
 - [ ] Uniswap V4, Curve, Balancer and aggregator decoding
-- [ ] Validate sandwich labels against a public MEV dataset; measure precision/recall
-- [ ] Net profit: subtract gas and coinbase transfers
-- [ ] Slippage-tolerance analysis: does a looser `amountOutMin` predict being sandwiched?
 - [ ] Export to Parquet and analysis notebooks with publication-quality figures
-- [ ] Write-up of a multi-week measurement
+- [ ] Write-up of the campaign
 
 ## Ethics
 

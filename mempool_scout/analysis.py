@@ -6,18 +6,22 @@ same code.
 
 Key definitions (see docs/methodology.md):
 
-* **Eligible block** — a block received during a collector session, with a
-  timestamp at least ``warmup_ms`` after the session started (the local mempool
-  view is incomplete right after start-up).
-* **Public transaction** — an included transaction whose hash our node announced
-  before ``block.timestamp + grace_ms``.  Everything else is treated as *private*
-  (sent through a private relay / builder RPC, or never reached our node).
+* **Coverage period** — consecutive sessions of one vantage separated by at most
+  ``max_gap_ms`` (a quick reconnect does not empty the recorded view).
+* **Eligible block** — a block whose timestamp falls inside a coverage period, at
+  least ``warmup_ms`` after the period started (the recorded mempool view is
+  incomplete right after start-up).
+* **Public transaction** — an included transaction whose hash any vantage point
+  saw before ``block.timestamp + grace_ms``.  Everything else is treated as
+  *private* (sent through a private relay / builder RPC, or never reached us).
 """
 
 from __future__ import annotations
 
+import csv
 import json
 import math
+import random
 import sqlite3
 from dataclasses import dataclass
 from typing import Any
@@ -27,15 +31,43 @@ from typing import Any
 class Params:
     warmup_ms: int = 5 * 60 * 1000
     grace_ms: int = 0
+    max_gap_ms: int = 60 * 1000
 
     def sql(self) -> dict[str, int]:
         return {"warmup_ms": self.warmup_ms, "grace_ms": self.grace_ms}
 
 
+# Gas paid by the front- and back-run of a sandwich, in ETH.
+SANDWICH_GAS = """(SELECT SUM(CAST(t.gas_used AS REAL) * CAST(t.effective_gas_price AS REAL)) / 1e18
+     FROM block_tx t WHERE t.hash IN (s.front_hash, s.back_hash))"""
+
+def coverage_periods(conn: sqlite3.Connection, max_gap_ms: int) -> list[tuple[str, int, int]]:
+    """Merge each vantage's sessions into continuous coverage periods."""
+    periods: list[list[Any]] = []
+    rows = conn.execute("""SELECT COALESCE(vantage, 'default'), started_ms, heartbeat_ms FROM sessions
+                           ORDER BY COALESCE(vantage, 'default'), started_ms""").fetchall()
+    for vantage, start, end in rows:
+        last = periods[-1] if periods else None
+        if last and last[0] == vantage and start - last[2] <= max_gap_ms:
+            last[2] = max(last[2], end)
+        else:
+            periods.append([vantage, start, end])
+    return [tuple(x) for x in periods]  # type: ignore[misc]
+
+
+def _prepare(conn: sqlite3.Connection, p: Params) -> None:
+    """(Re)build ``temp.coverage``, which the eligibility CTEs read.  Works on read-only connections."""
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS coverage (vantage TEXT, start_ms INTEGER, end_ms INTEGER)")
+    conn.execute("DELETE FROM temp.coverage")
+    conn.executemany("INSERT INTO temp.coverage VALUES (?,?,?)", coverage_periods(conn, p.max_gap_ms))
+
+
 ELIGIBLE = """
 WITH eb AS (
-    SELECT b.* FROM blocks b JOIN sessions s ON s.id = b.session_id
-    WHERE b.timestamp * 1000 >= s.started_ms + :warmup_ms
+    SELECT b.* FROM blocks b
+    WHERE EXISTS (SELECT 1 FROM temp.coverage c
+                  WHERE c.start_ms + :warmup_ms <= b.timestamp * 1000
+                    AND b.timestamp * 1000 <= c.end_ms)
 ),
 etx AS (
     SELECT t.*, eb.timestamp AS block_ts, eb.builder_tag, p.first_seen_ms,
@@ -85,6 +117,7 @@ def _all(conn: sqlite3.Connection, sql: str, params: dict[str, Any] | None = Non
 
 # ── Overview ────────────────────────────────────────────────────────────────
 def overview(conn: sqlite3.Connection, p: Params, large_swap_eth: float = 10.0) -> dict[str, Any]:
+    _prepare(conn, p)
     q = p.sql()
     sess = _one(conn, """SELECT COUNT(*) n, MIN(started_ms) first_ms, MAX(heartbeat_ms) last_ms,
                                 COALESCE(SUM(heartbeat_ms - started_ms), 0) runtime_ms FROM sessions""")
@@ -99,6 +132,7 @@ def overview(conn: sqlite3.Connection, p: Params, large_swap_eth: float = 10.0) 
     sw = _one(conn, ELIGIBLE + """
         SELECT COUNT(*) n, COUNT(DISTINCT s.attacker) attackers,
                COALESCE(SUM(s.gross_profit_eth), 0) profit_eth,
+               COALESCE(SUM(s.gross_profit_eth - """ + SANDWICH_GAS + """), 0) net_profit_eth,
                COALESCE(SUM(CASE WHEN e.is_public = 1 THEN 1 ELSE 0 END), 0) public_victims
         FROM sandwiches s JOIN eb ON eb.number = s.block_number
         LEFT JOIN etx e ON e.hash = s.victim_hash""", q)
@@ -123,6 +157,7 @@ def overview(conn: sqlite3.Connection, p: Params, large_swap_eth: float = 10.0) 
         "sandwiches": sw["n"],
         "sandwich_attackers": sw["attackers"],
         "sandwich_gross_profit_eth": sw["profit_eth"],
+        "sandwich_net_profit_eth": sw["net_profit_eth"],
         "sandwich_victims_public": sw["public_victims"],
         "sandwich_victim_public_share": _share(sw["public_victims"], sw["n"]),
         "large_swaps_seen": large["n"],
@@ -133,6 +168,7 @@ def overview(conn: sqlite3.Connection, p: Params, large_swap_eth: float = 10.0) 
 
 # ── Visibility ──────────────────────────────────────────────────────────────
 def visibility_timeseries(conn: sqlite3.Connection, p: Params, bucket_s: int = 3600) -> list[dict[str, Any]]:
+    _prepare(conn, p)
     rows = _all(conn, ELIGIBLE + """
         SELECT (block_ts / :bucket) * :bucket AS bucket_ts,
                COUNT(DISTINCT block_number) blocks,
@@ -146,6 +182,7 @@ def visibility_timeseries(conn: sqlite3.Connection, p: Params, bucket_s: int = 3
 
 
 def visibility_by_type(conn: sqlite3.Connection, p: Params) -> list[dict[str, Any]]:
+    _prepare(conn, p)
     rows = _all(conn, ELIGIBLE + """
         SELECT COALESCE(tx_type, -1) tx_type, COUNT(*) txs, SUM(is_public) public_txs
         FROM etx GROUP BY tx_type ORDER BY txs DESC""", p.sql())
@@ -155,6 +192,7 @@ def visibility_by_type(conn: sqlite3.Connection, p: Params) -> list[dict[str, An
 
 
 def builders(conn: sqlite3.Connection, p: Params, limit: int = 15) -> list[dict[str, Any]]:
+    _prepare(conn, p)
     rows = _all(conn, ELIGIBLE + """
         , sw AS (SELECT block_number, COUNT(*) n FROM sandwiches GROUP BY block_number)
         SELECT eb.builder_tag, COUNT(*) blocks,
@@ -180,6 +218,7 @@ DELAY_EDGES_S = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256]
 
 def inclusion_delay(conn: sqlite3.Connection, p: Params) -> dict[str, Any]:
     """Distribution of (block timestamp - first seen) for public transactions."""
+    _prepare(conn, p)
     delays = [r[0] for r in conn.execute(ELIGIBLE + """
         SELECT block_ts * 1000 - first_seen_ms FROM etx WHERE is_public = 1""", p.sql())]
     delays.sort()
@@ -198,6 +237,7 @@ def inclusion_delay(conn: sqlite3.Connection, p: Params) -> dict[str, Any]:
 # ── Sandwich exposure (the headline research question) ──────────────────────
 def exposure(conn: sqlite3.Connection, p: Params) -> dict[str, Any]:
     """Are publicly visible router swaps sandwiched more often than private ones?"""
+    _prepare(conn, p)
     rows = {r["is_public"]: r for r in _all(conn, ELIGIBLE + """
         SELECT e.is_public, COUNT(*) swaps,
                SUM(CASE WHEN EXISTS (SELECT 1 FROM sandwiches s WHERE s.victim_hash = e.hash) THEN 1 ELSE 0 END) sandwiched
@@ -259,14 +299,19 @@ def block_detail(conn: sqlite3.Connection, number: int, p: Params) -> dict[str, 
 
 
 def sandwich_list(conn: sqlite3.Connection, p: Params, limit: int = 50) -> list[dict[str, Any]]:
-    return _all(conn, """
+    rows = _all(conn, """
         SELECT s.*, b.timestamp, b.builder_tag, pt.first_seen_ms AS victim_first_seen_ms,
+               """ + SANDWICH_GAS + """ AS gas_cost_eth,
                CASE WHEN pt.first_seen_ms < b.timestamp * 1000 + :grace_ms THEN 1 ELSE 0 END victim_public,
                (SELECT function FROM swap_intent si WHERE si.hash = s.victim_hash ORDER BY idx LIMIT 1) victim_function,
                (SELECT MAX(eth_notional) FROM swap_intent si WHERE si.hash = s.victim_hash) victim_eth_notional
         FROM sandwiches s JOIN blocks b ON b.number = s.block_number
         LEFT JOIN pending_tx pt ON pt.hash = s.victim_hash
         ORDER BY s.block_number DESC LIMIT :limit""", {**p.sql(), "limit": limit})
+    for r in rows:
+        gross, gas = r["gross_profit_eth"], r["gas_cost_eth"]
+        r["net_profit_eth"] = None if gross is None or gas is None else gross - gas
+    return rows
 
 
 def large_swaps(conn: sqlite3.Connection, min_eth: float = 10.0, limit: int = 50) -> list[dict[str, Any]]:
@@ -308,3 +353,195 @@ def alerts_since(conn: sqlite3.Connection, after_id: int = 0, limit: int = 50) -
     for r in rows:
         r["payload"] = json.loads(r["payload"]) if r["payload"] else {}
     return rows
+
+
+# ── Vantage points (measurement-error study for RQ1) ────────────────────────
+VANTAGE_CTE = """
+WITH cov AS (
+    SELECT b.number, b.timestamp FROM blocks b
+    JOIN temp.coverage s ON s.start_ms + :warmup_ms <= b.timestamp * 1000 AND b.timestamp * 1000 <= s.end_ms
+    GROUP BY b.number HAVING COUNT(DISTINCT s.vantage) = :nv
+),
+ctx AS (
+    SELECT t.hash, t.is_router_swap, c.timestamp * 1000 + :grace_ms AS cutoff
+    FROM cov c JOIN block_tx t ON t.block_number = c.number
+),
+seen AS (
+    SELECT x.hash, ps.vantage, ps.first_seen_ms FROM ctx x
+    JOIN pending_sighting ps ON ps.hash = x.hash AND ps.first_seen_ms < x.cutoff
+),
+agg AS (SELECT hash, COUNT(*) nseen, MIN(first_seen_ms) fastest FROM seen GROUP BY hash)
+"""
+
+
+def vantage_status(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Cheap per-vantage summary for health checks."""
+    return _all(conn, """
+        SELECT COALESCE(vantage, 'default') vantage, COUNT(*) sessions, MIN(started_ms) first_ms,
+               MAX(heartbeat_ms) last_heartbeat_ms, SUM(heartbeat_ms - started_ms) / 3600000.0 runtime_hours,
+               GROUP_CONCAT(DISTINCT endpoint_host) endpoints
+        FROM sessions GROUP BY COALESCE(vantage, 'default') ORDER BY vantage""")
+
+
+def vantages(conn: sqlite3.Connection, p: Params) -> dict[str, Any]:
+    """Compare vantage points on the blocks that *all* of them observed.
+
+    A single vantage under-counts public transactions that never reached it; the
+    union of all vantages is the best available estimate, so
+    ``union_share - vantage_share`` bounds that vantage's measurement error.
+    """
+    _prepare(conn, p)
+    status = vantage_status(conn)
+    names = [v["vantage"] for v in status]
+    if not names:
+        return {"vantages": [], "common_blocks": 0, "txs": 0, "union": None, "per_vantage": []}
+    q = {**p.sql(), "nv": len(names)}
+    tot = _one(conn, VANTAGE_CTE + """
+        SELECT (SELECT COUNT(*) FROM cov) blocks, COUNT(*) txs, COALESCE(SUM(is_router_swap), 0) swaps FROM ctx""", q)
+    uni = _one(conn, VANTAGE_CTE + """
+        SELECT COUNT(*) public_txs, COALESCE(SUM(x.is_router_swap), 0) public_swaps
+        FROM agg a JOIN ctx x ON x.hash = a.hash""", q)
+    rows = {r["vantage"]: r for r in _all(conn, VANTAGE_CTE + """
+        SELECT s.vantage, COUNT(*) public_txs, COALESCE(SUM(x.is_router_swap), 0) public_swaps,
+               SUM(CASE WHEN a.nseen = 1 THEN 1 ELSE 0 END) exclusive,
+               SUM(CASE WHEN s.first_seen_ms = a.fastest THEN 1 ELSE 0 END) first_seen,
+               AVG(s.first_seen_ms - a.fastest) avg_lag_ms
+        FROM seen s JOIN agg a ON a.hash = s.hash JOIN ctx x ON x.hash = s.hash
+        GROUP BY s.vantage""", q)}
+    medians = {r["vantage"]: r["lag"] for r in _all(conn, VANTAGE_CTE + """
+        , lags AS (SELECT s.vantage, s.first_seen_ms - a.fastest lag,
+                          ROW_NUMBER() OVER (PARTITION BY s.vantage ORDER BY s.first_seen_ms - a.fastest) rn,
+                          COUNT(*) OVER (PARTITION BY s.vantage) cnt
+                   FROM seen s JOIN agg a ON a.hash = s.hash)
+        SELECT vantage, lag FROM lags WHERE rn = (cnt + 1) / 2""", q)}
+    union_share = _share(uni["public_txs"], tot["txs"])
+    per = []
+    for v in status:
+        r = rows.get(v["vantage"], {})
+        pub = r.get("public_txs", 0) or 0
+        share = _share(pub, tot["txs"])
+        per.append({
+            **v,
+            "public_txs": pub,
+            "public_share": share,
+            "public_swaps": r.get("public_swaps", 0) or 0,
+            "swap_public_share": _share(r.get("public_swaps", 0), tot["swaps"]),
+            "underestimate_pp": None if share is None or union_share is None else (union_share - share) * 100,
+            "exclusive": r.get("exclusive", 0) or 0,
+            "first_seen_share": _share(r.get("first_seen", 0), pub),
+            "avg_lag_ms": r.get("avg_lag_ms"),
+            "median_lag_ms": medians.get(v["vantage"]),
+        })
+    return {
+        "vantages": names,
+        "common_blocks": tot["blocks"],
+        "txs": tot["txs"],
+        "router_swaps": tot["swaps"],
+        "union": {"public_txs": uni["public_txs"], "public_share": union_share,
+                  "public_swaps": uni["public_swaps"], "swap_public_share": _share(uni["public_swaps"], tot["swaps"])},
+        "per_vantage": per,
+    }
+
+
+# ── Slippage tolerance (RQ2 mechanism) ──────────────────────────────────────
+TOLERANCE_BUCKETS: list[tuple[float | None, float | None, str]] = [
+    (None, 0.0, "below quote"),
+    (0.0, 0.001, "0–0.1%"),
+    (0.001, 0.005, "0.1–0.5%"),
+    (0.005, 0.01, "0.5–1%"),
+    (0.01, 0.02, "1–2%"),
+    (0.02, 0.05, "2–5%"),
+    (0.05, None, "≥ 5%"),
+]
+TIGHT_BELOW = 0.005
+
+
+def _median(xs: list[float]) -> float | None:
+    if not xs:
+        return None
+    xs = sorted(xs)
+    n = len(xs)
+    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+
+def slippage(conn: sqlite3.Connection, p: Params) -> dict[str, Any]:
+    """Sandwich rate of public, successful router swaps by quoted slippage tolerance."""
+    _prepare(conn, p)
+    rows = conn.execute(ELIGIBLE + """
+        , tol AS (SELECT hash, MAX(slippage_tol) tol FROM swap_intent
+                  WHERE source = 'mempool' AND slippage_tol IS NOT NULL GROUP BY hash)
+        SELECT tol.tol, CASE WHEN EXISTS (SELECT 1 FROM sandwiches s WHERE s.victim_hash = e.hash) THEN 1 ELSE 0 END
+        FROM etx e JOIN tol ON tol.hash = e.hash
+        WHERE e.status = 1 AND e.is_public = 1 AND e.is_router_swap = 1""", p.sql()).fetchall()
+    coverage = _one(conn, ELIGIBLE + """
+        SELECT COUNT(*) n FROM etx WHERE status = 1 AND is_public = 1 AND is_router_swap = 1""", p.sql())["n"]
+
+    buckets = []
+    for lo, hi, label in TOLERANCE_BUCKETS:
+        sel = [hit for t, hit in rows if (lo is None or t >= lo) and (hi is None or t < hi)]
+        k, n = sum(sel), len(sel)
+        ci = wilson_interval(k, n)
+        buckets.append({"label": label, "lo": lo, "hi": hi, "swaps": n, "sandwiched": k,
+                        "rate": _share(k, n), "ci95": list(ci) if ci else None})
+    tight = [hit for t, hit in rows if t < TIGHT_BELOW]
+    loose = [hit for t, hit in rows if t >= TIGHT_BELOW]
+    return {
+        "public_router_swaps": coverage,
+        "quoted": len(rows),
+        "quote_coverage": _share(len(rows), coverage),
+        "buckets": buckets,
+        "median_tolerance_sandwiched": _median([t for t, hit in rows if hit]),
+        "median_tolerance_other": _median([t for t, hit in rows if not hit]),
+        "tight_vs_loose": {
+            "threshold": TIGHT_BELOW,
+            "tight": {"swaps": len(tight), "sandwiched": sum(tight), "rate": _share(sum(tight), len(tight))},
+            "loose": {"swaps": len(loose), "sandwiched": sum(loose), "rate": _share(sum(loose), len(loose))},
+            "test": two_proportion_z_test(sum(loose), len(loose), sum(tight), len(tight)),
+        },
+    }
+
+
+# ── Detector validation ─────────────────────────────────────────────────────
+LABEL_FIELDS = ["victim_hash", "pool", "block_number", "front_hash", "back_hash", "attacker",
+                "gross_profit_eth", "victim_url", "front_url", "back_url", "label", "notes"]
+POSITIVE = {"tp", "true", "yes", "y", "1", "sandwich"}
+NEGATIVE = {"fp", "false", "no", "n", "0", "not"}
+
+
+def label_sample(conn: sqlite3.Connection, n: int = 100, seed: int = 1) -> list[dict[str, Any]]:
+    """Random sample of detected sandwiches, ready for manual labelling."""
+    rows = _all(conn, """SELECT victim_hash, pool, block_number, front_hash, back_hash, attacker, gross_profit_eth
+                         FROM sandwiches ORDER BY block_number, victim_hash""")
+    rng = random.Random(seed)
+    sample = rows if len(rows) <= n else rng.sample(rows, n)
+    for r in sample:
+        r["victim_url"] = f"https://etherscan.io/tx/{r['victim_hash']}"
+        r["front_url"] = f"https://etherscan.io/tx/{r['front_hash']}"
+        r["back_url"] = f"https://etherscan.io/tx/{r['back_hash']}"
+        r["label"] = ""
+        r["notes"] = ""
+    return sorted(sample, key=lambda r: (r["block_number"], r["victim_hash"]))
+
+
+def write_label_csv(rows: list[dict[str, Any]], path: str) -> None:
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=LABEL_FIELDS)
+        w.writeheader()
+        w.writerows(rows)
+
+
+def precision_from_labels(path: str) -> dict[str, Any]:
+    """Precision of the detector from a labelled CSV (label column: TP/FP)."""
+    tp = fp = unlabelled = 0
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            label = (row.get("label") or "").strip().lower()
+            if label in POSITIVE:
+                tp += 1
+            elif label in NEGATIVE:
+                fp += 1
+            else:
+                unlabelled += 1
+    ci = wilson_interval(tp, tp + fp)
+    return {"true_positives": tp, "false_positives": fp, "unlabelled": unlabelled,
+            "precision": _share(tp, tp + fp), "ci95": list(ci) if ci else None}

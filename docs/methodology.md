@@ -8,8 +8,13 @@ so results can be reproduced, criticised and cited.
 * **RQ1 — Visibility.** What share of the transactions included in Ethereum blocks
   were visible in the public peer-to-peer mempool before inclusion, and how does
   this differ by transaction type and by block builder?
+* **RQ1b — Measurement error.** How much does a single vantage point
+  under-estimate public visibility, and how much do vantage points differ in
+  what they see and how fast?
 * **RQ2 — Exposure.** Are Uniswap swaps that were visible in the public mempool
   sandwiched more often than swaps that were submitted privately?
+* **RQ2b — Mechanism.** Among public swaps, does a looser slippage tolerance
+  predict being sandwiched?
 * **RQ3 — Builders.** How concentrated is block building, and do builders that
   win more blocks include a larger share of private order flow?
 
@@ -31,18 +36,31 @@ Each connection is a **session** (`sessions` table: start time, heartbeat, end
 time, vantage label, endpoint host).  Reconnects start a new session, so gaps in
 coverage are explicit.
 
+**Vantage points.** Several collectors, each connected to a different node or
+provider, can write to the same database.  Each records its own sightings in
+`pending_sighting(hash, vantage, first_seen_ms)`; `pending_tx.first_seen_ms` keeps
+the earliest sighting over all vantages.  Usually one collector ingests blocks and
+the others run `--mempool-only`.  All collectors should run on one host, so they
+share one NTP-synchronised clock.
+
 **Clock.** Timestamps come from the collector host's clock.  Run it on a machine
 synchronised with NTP; skew shifts every inclusion delay by the same offset.
 
 ## Definitions
 
-**Eligible block.** A block received during a session whose timestamp is at least
-`warmup` after that session started (default 5 min).  Right after start-up the
+**Coverage period.** Consecutive sessions of one vantage separated by at most
+60 s.  Free endpoints drop WebSocket connections every few minutes; a reconnect
+of a few seconds does not empty the recorded view (earlier sightings stay in the
+database), so it should not restart the warm-up.  Transactions broadcast during
+the gap itself are missed by that vantage, which the multi-vantage design covers.
+
+**Eligible block.** A block whose timestamp falls inside some coverage period, at
+least `warmup` after that period started (default 5 min).  Right after start-up the
 local mempool view is empty, which would wrongly classify old pending
 transactions as private.
 
-**Public transaction.** An included transaction whose hash was first seen before
-`block.timestamp + grace` (default grace 0 s).  The block timestamp is the start
+**Public transaction.** An included transaction whose hash was first seen, by any
+vantage, before `block.timestamp + grace` (default grace 0 s).  The block timestamp is the start
 of the slot, roughly when the proposer commits to a block, so a transaction
 first seen after it could not have influenced the builder's view of the public
 mempool.  Both parameters can be changed in the dashboard and the report.
@@ -65,6 +83,43 @@ Uniswap V2 Router02 and forks (9 functions), V3 SwapRouter and SwapRouter02
 (exact amount, or the bound — minimum out / maximum in).  Token-to-token swaps
 without WETH have no ETH notional; converting them would need price data.
 
+## Comparing vantage points (RQ1b)
+
+The comparison uses only **common blocks**: blocks whose timestamp lies inside a
+warmed-up coverage period of *every* vantage.  On those blocks, with `U` the set of
+transactions seen publicly by at least one vantage:
+
+* **Union share** `|U| / txs`, the best available estimate of public visibility;
+* **Vantage share** for vantage `v`, and its **under-estimate**
+  `union share − vantage share` (percentage points), a lower bound on the error
+  of a single-vantage study;
+* **Exclusive** sightings: transactions only `v` saw publicly;
+* **First to see**: share of `v`'s public sightings where `v` was earliest;
+* **Lag**: median and mean of `first_seen(v) − min over vantages(first_seen)`.
+  The mean is sensitive to transactions one vantage saw minutes later (for
+  example after re-broadcasts), so the median is the primary statistic.
+
+## Slippage tolerance (RQ2b)
+
+When a collector first decodes a public exact-input router swap, it quotes the same
+trade against current pool state with an `eth_call`: `getAmountsOut` on the
+Uniswap V2 (or SushiSwap) router for V2 paths, `quoteExactInput` on Uniswap
+QuoterV2 for V3 paths.  With the user's minimum output `amountOutMin`:
+
+    tolerance = 1 − amountOutMin / quoted_output
+
+This is the price impact the user agreed to absorb, so it is an upper bound on
+what a sandwich can extract from them.  Swaps are grouped into tolerance bands
+(below quote, 0–0.1%, 0.1–0.5%, 0.5–1%, 1–2%, 2–5%, ≥ 5%) and the sandwich rate
+of each band is reported with Wilson intervals; *tight* (< 0.5%) and *loose*
+swaps are compared with a two-proportion z-test.  Multi-intent transactions use
+their loosest leg.
+
+Limitations: quotes use `latest` state, which may be up to one block older than
+the state the swap executes against; exact-output swaps and token-to-token swaps
+through other venues are not quoted; quotes are only taken by collectors that
+fetch full transactions.
+
 ## Sandwich detection
 
 Detection uses executed `Swap` events from receipts, so it also sees bots that
@@ -80,8 +135,15 @@ ordered by (transaction index, log index) and a triple
 
 Each victim is counted once per pool.  **Gross profit** is
 `received_in_back − paid_in_front` in the front-run's input token, converted to ETH
-only when that token is WETH.  Gas fees and direct builder payments
-(coinbase transfers) are *not* subtracted.
+only when that token is WETH.  **Net profit** subtracts the gas the front- and
+back-run paid (`gasUsed × effectiveGasPrice`).  Direct payments to the builder
+(coinbase transfers inside the bot's transaction) are *not* subtracted, because
+they require execution traces that most hosted endpoints do not serve.
+
+**Validation.** `mempool-scout label-sample` exports a random sample of detections
+with Etherscan links; after labelling each as TP or FP by hand,
+`mempool-scout validate` reports the detector's precision with a 95% Wilson
+interval, and `report --labels` includes it in the report.
 
 This follows the heuristics of Torres et al. (2021) and Qin et al. (2022) and
 inherits their limits: multi-pool or multi-block sandwiches and attackers that
@@ -100,12 +162,12 @@ market maker can produce false positives.
 
 | Threat | Effect | Mitigation |
 |---|---|---|
-| Single vantage point | Some public transactions never reach our node → private share is over-estimated | Run collectors with different `--vantage` labels on different providers or a self-hosted node with many peers; report per-vantage results |
+| Single vantage point | Some public transactions never reach our node → private share is over-estimated | Several vantages in one database; the RQ1b analysis quantifies the remaining error |
 | Provider filtering | Hosted RPC endpoints may sample or delay the pending stream | Record the endpoint per session; compare against a self-hosted node |
 | Blob transactions | Blob transactions are announced but not broadcast in full, so propagation differs | Report results by transaction type |
 | Re-orgs | A block may be replaced | Blocks are stored by height and replaced atomically; affected sandwiches are recomputed |
 | Router coverage | Swaps via aggregators, Uniswap V4, Curve, Balancer are not decoded | Treated as non-router transactions; extendable via `--router` and new decoders |
-| Heuristic labels | False positives/negatives in sandwich detection | Manual validation sample against public MEV datasets is planned |
+| Heuristic labels | False positives/negatives in sandwich detection | Precision measured on a labelled random sample (`label-sample`, `validate`); recall is not measured |
 
 ## Ethics
 

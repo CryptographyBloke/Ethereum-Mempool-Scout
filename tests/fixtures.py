@@ -107,9 +107,11 @@ def sandwich_block(number: int = 100, timestamp: int = 1_700_000_000) -> dict[st
 class FakeEth:
     """Test double with the same methods as ``mempool_scout.rpc.EthRpc``."""
 
-    def __init__(self, blocks: dict[int, dict[str, Any]], pool_tokens: dict[str, tuple[str, str]]):
+    def __init__(self, blocks: dict[int, dict[str, Any]], pool_tokens: dict[str, tuple[str, str]],
+                 quote_out: int = 100_000 * 10**6):
         self.blocks = blocks
         self.pool_tokens = pool_tokens
+        self.quote_out = quote_out
 
     async def get_block(self, number: int, full_transactions: bool = False) -> dict[str, Any]:
         return self.blocks[number]["block"]
@@ -132,6 +134,12 @@ class FakeEth:
         return None
 
     async def call(self, tx: dict[str, Any]) -> bytes:
+        data = tx["data"] if isinstance(tx["data"], str) else "0x" + tx["data"].hex()
+        if data.startswith("0x" + sel("getAmountsOut(uint256,address[])").hex()):
+            # Quote: pretend the pool returns exactly `self.quote_out` for any input.
+            from eth_abi import decode as _dec
+            amount_in, path = _dec(["uint256", "address[]"], bytes.fromhex(data[10:]))
+            return encode(["uint256[]"], [[amount_in] + [self.quote_out] * (len(path) - 1)])
         t0, t1 = self.pool_tokens[tx["to"].lower()]
         token = t0 if tx["data"] == "0x0dfe1681" else t1
         return b"\x00" * 12 + bytes.fromhex(token[2:])

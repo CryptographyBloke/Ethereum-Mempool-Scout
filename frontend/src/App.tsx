@@ -5,6 +5,7 @@ import { useI18n, type Language } from "./i18n";
 import { useLiveStream, usePref, useRoute } from "./hooks";
 import { BlockDetail, Blocks } from "./pages/Blocks";
 import { Overview } from "./pages/Overview";
+import { Research } from "./pages/Research";
 import { Builders, LargeSwaps, Sandwiches, TxPage } from "./pages/Tables";
 
 const NAV = [
@@ -13,6 +14,7 @@ const NAV = [
   { path: "builders", label: "Builders" },
   { path: "sandwiches", label: "Sandwiches" },
   { path: "swaps", label: "Large swaps" },
+  { path: "research", label: "Research" },
 ];
 
 type Theme = "system" | "light" | "dark";
@@ -53,10 +55,11 @@ export function App() {
   else if (page === "builders") body = <Builders params={params} />;
   else if (page === "sandwiches") body = <Sandwiches params={params} liveCount={live.blockCount} />;
   else if (page === "swaps") body = <LargeSwaps />;
+  else if (page === "research") body = <Research params={params} />;
   else if (page === "tx" && arg) body = <TxPage hash={arg.toLowerCase()} />;
   else body = <p>{t("Page not found.")} <a href="#/">{t("Go to overview")}</a></p>;
 
-  const usesParams = !page || page === "builders";
+  const usesParams = !page || page === "builders" || page === "research";
 
   return (
     <div className="app">
@@ -108,14 +111,14 @@ export function App() {
               {[0, 1000, 2000, 4000].map((v) => <option key={v} value={v}>{v / 1000} s</option>)}
             </select>
           </label>
-          <span className="muted small">{t("A transaction is public if this node saw its hash before the block timestamp (+ grace).")}</span>
+          <span className="muted small">{t("A transaction is public if any vantage point saw its hash before the block timestamp (+ grace).")}</span>
         </div>
       )}
 
       <main>{body}</main>
 
       <footer className="muted small">
-        {t("Read-only research tool · data from a single vantage point; see")} <a href="https://github.com/CryptographyBloke/Ethereum-Mempool-Scout/blob/main/docs/methodology.md" target="_blank" rel="noreferrer">{t("methodology")}</a> {t("for definitions and limitations.")}
+        {t("Read-only research tool · data from the vantage points listed under Research; see")} <a href="https://github.com/CryptographyBloke/Ethereum-Mempool-Scout/blob/main/docs/methodology.md" target="_blank" rel="noreferrer">{t("methodology")}</a> {t("for definitions and limitations.")}
       </footer>
     </div>
   );

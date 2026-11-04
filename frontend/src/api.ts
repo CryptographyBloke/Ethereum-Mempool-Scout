@@ -24,6 +24,7 @@ export interface Overview {
   sandwiches: number;
   sandwich_attackers: number;
   sandwich_gross_profit_eth: number;
+  sandwich_net_profit_eth: number;
   sandwich_victims_public: number;
   sandwich_victim_public_share: number | null;
   large_swaps_seen: number;
@@ -129,6 +130,8 @@ export interface SandwichRow {
   profit_token: string | null;
   gross_profit: string;
   gross_profit_eth: number | null;
+  gas_cost_eth: number | null;
+  net_profit_eth: number | null;
   timestamp: number;
   builder_tag: string;
   victim_public: number;
@@ -178,6 +181,57 @@ export interface TxLookup {
   sandwiches: SandwichRow[];
 }
 
+export interface VantageStat {
+  vantage: string;
+  sessions: number;
+  runtime_hours: number;
+  last_heartbeat_ms: number | null;
+  endpoints: string | null;
+  public_txs: number;
+  public_share: number | null;
+  public_swaps: number;
+  swap_public_share: number | null;
+  underestimate_pp: number | null;
+  exclusive: number;
+  first_seen_share: number | null;
+  avg_lag_ms: number | null;
+  median_lag_ms: number | null;
+}
+
+export interface VantageReport {
+  vantages: string[];
+  common_blocks: number;
+  txs: number;
+  router_swaps: number;
+  union: { public_txs: number; public_share: number | null; public_swaps: number; swap_public_share: number | null } | null;
+  per_vantage: VantageStat[];
+}
+
+export interface Bucket {
+  label: string;
+  lo: number | null;
+  hi: number | null;
+  swaps: number;
+  sandwiched: number;
+  rate: number | null;
+  ci95: [number, number] | null;
+}
+
+export interface SlippageReport {
+  public_router_swaps: number;
+  quoted: number;
+  quote_coverage: number | null;
+  buckets: Bucket[];
+  median_tolerance_sandwiched: number | null;
+  median_tolerance_other: number | null;
+  tight_vs_loose: {
+    threshold: number;
+    tight: { swaps: number; sandwiched: number; rate: number | null };
+    loose: { swaps: number; sandwiched: number; rate: number | null };
+    test: { z: number; p_value: number } | null;
+  };
+}
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -219,4 +273,6 @@ export const api = {
   largeSwaps: (minEth: number) => get<LargeSwap[]>(`/swaps/large${qs(undefined, { min_eth: minEth, limit: 100 })}`),
   alerts: () => get<Alert[]>(`/alerts?limit=30`),
   tx: (hash: string) => get<TxLookup>(`/tx/${hash}`),
+  vantages: (p: Params) => get<VantageReport>(`/vantages${qs(p)}`),
+  slippage: (p: Params) => get<SlippageReport>(`/slippage${qs(p)}`),
 };
