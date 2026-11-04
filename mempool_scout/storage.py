@@ -16,7 +16,7 @@ from .decoders import SwapIntent
 from .sandwich import PoolSwap, Sandwich
 from .utils import now_ms
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
@@ -33,7 +33,15 @@ CREATE TABLE IF NOT EXISTS sessions (
     version       TEXT
 );
 
--- Every hash announced by the node's public mempool, with the time we first saw it.
+-- One row per (hash, vantage): when each collector first saw the hash.
+CREATE TABLE IF NOT EXISTS pending_sighting (
+    hash          TEXT NOT NULL,
+    vantage       TEXT NOT NULL,
+    first_seen_ms INTEGER NOT NULL,
+    PRIMARY KEY (hash, vantage)
+) WITHOUT ROWID;
+
+-- Every hash announced by any vantage, with the EARLIEST sighting across vantages.
 CREATE TABLE IF NOT EXISTS pending_tx (
     hash             TEXT PRIMARY KEY,
     first_seen_ms    INTEGER NOT NULL,
@@ -69,6 +77,11 @@ CREATE TABLE IF NOT EXISTS swap_intent (
     eth_notional_wei TEXT,
     eth_notional     REAL,
     seen_ms          INTEGER,
+    fees             TEXT,
+    quote_out        TEXT,     -- expected output quoted when first seen (exact-input swaps)
+    slippage_tol     REAL,     -- 1 - amount_out_min / quote_out
+    quote_ms         INTEGER,
+    quote_error      TEXT,
     PRIMARY KEY (hash, idx)
 );
 CREATE INDEX IF NOT EXISTS idx_swap_eth ON swap_intent(eth_notional);
@@ -149,6 +162,33 @@ CREATE TABLE IF NOT EXISTS alerts (
 """
 
 
+# Columns added after v1: (table, column, type).  Applied with ALTER TABLE on old files.
+ADDED_COLUMNS = [
+    ("swap_intent", "fees", "TEXT"),
+    ("swap_intent", "quote_out", "TEXT"),
+    ("swap_intent", "slippage_tol", "REAL"),
+    ("swap_intent", "quote_ms", "INTEGER"),
+    ("swap_intent", "quote_error", "TEXT"),
+]
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    """Bring an existing database up to SCHEMA_VERSION.  Idempotent."""
+    row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    version = int(row[0]) if row else SCHEMA_VERSION
+    for table, column, ctype in ADDED_COLUMNS:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ctype}")
+    if version < 2:
+        # v1 kept one sighting per hash; attribute it to the vantage of its session.
+        conn.execute("""INSERT OR IGNORE INTO pending_sighting(hash, vantage, first_seen_ms)
+                        SELECT p.hash, COALESCE(s.vantage, 'default'), p.first_seen_ms
+                        FROM pending_tx p LEFT JOIN sessions s ON s.id = p.session_id""")
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+    conn.commit()
+
+
 def _s(v: int | None) -> str | None:
     return None if v is None else str(v)
 
@@ -156,15 +196,20 @@ def _s(v: int | None) -> str | None:
 def connect(path: str | Path, readonly: bool = False) -> sqlite3.Connection:
     path = str(path)
     if readonly and path != ":memory:":
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False, timeout=30)
     else:
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(path, check_same_thread=False)
+        conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
+        fresh = conn.execute("SELECT name FROM sqlite_master WHERE name='meta'").fetchone() is None
         conn.executescript(SCHEMA)
-        conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+        if fresh:
+            conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+        migrate(conn)
+    # Several collectors (one per vantage) may write the same file: wait for the lock.
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -195,13 +240,33 @@ class Store:
         self.conn.commit()
 
     # mempool ----------------------------------------------------------------
-    def record_pending_hash(self, tx_hash: str, seen_ms: int, session_id: int | None) -> bool:
-        """Store the first sighting of a hash. Returns False if it was already known."""
+    def record_pending_hash(self, tx_hash: str, seen_ms: int, session_id: int | None,
+                            vantage: str = "default") -> tuple[bool, bool]:
+        """Record a sighting.  Returns ``(new_for_this_vantage, new_overall)``.
+
+        ``pending_tx.first_seen_ms`` keeps the earliest sighting over all vantages,
+        even if a later-written sighting carries an earlier timestamp."""
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO pending_sighting(hash, vantage, first_seen_ms) VALUES (?,?,?)",
+            (tx_hash, vantage, seen_ms),
+        )
+        if cur.rowcount != 1:
+            return False, False
         cur = self.conn.execute(
             "INSERT OR IGNORE INTO pending_tx(hash, first_seen_ms, session_id) VALUES (?,?,?)",
             (tx_hash, seen_ms, session_id),
         )
-        return cur.rowcount == 1
+        if cur.rowcount == 1:
+            return True, True
+        self.conn.execute(
+            "UPDATE pending_tx SET first_seen_ms=?, session_id=? WHERE hash=? AND first_seen_ms > ?",
+            (seen_ms, session_id, tx_hash, seen_ms),
+        )
+        return True, False
+
+    def is_fetched(self, tx_hash: str) -> bool:
+        row = self.conn.execute("SELECT fetched FROM pending_tx WHERE hash=?", (tx_hash,)).fetchone()
+        return bool(row and row[0])
 
     def record_pending_details(self, tx_hash: str, d: dict[str, Any]) -> None:
         self.conn.execute(
@@ -215,14 +280,21 @@ class Store:
                             seen_ms: int | None) -> None:
         self.conn.executemany(
             """INSERT OR REPLACE INTO swap_intent(hash, idx, source, router, protocol, function, token_in, token_out,
-                   exact_input, amount_in, amount_out, path, eth_notional_wei, eth_notional, seen_ms)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   exact_input, amount_in, amount_out, path, eth_notional_wei, eth_notional, seen_ms, fees)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             [
                 (tx_hash, i, source, router, s.protocol, s.function, s.token_in, s.token_out, int(s.exact_input),
                  _s(s.amount_in), _s(s.amount_out), json.dumps(s.path), _s(s.eth_notional_wei),
-                 None if s.eth_notional_wei is None else s.eth_notional_wei / 1e18, seen_ms)
+                 None if s.eth_notional_wei is None else s.eth_notional_wei / 1e18, seen_ms, json.dumps(s.fees))
                 for i, s in enumerate(intents)
             ],
+        )
+
+    def record_quote(self, tx_hash: str, idx: int, quote_out: int | None, tolerance: float | None,
+                     quote_ms: int, error: str | None = None) -> None:
+        self.conn.execute(
+            "UPDATE swap_intent SET quote_out=?, slippage_tol=?, quote_ms=?, quote_error=? WHERE hash=? AND idx=?",
+            (_s(quote_out), tolerance, quote_ms, error, tx_hash, idx),
         )
 
     def has_swap_intent(self, tx_hash: str) -> bool:

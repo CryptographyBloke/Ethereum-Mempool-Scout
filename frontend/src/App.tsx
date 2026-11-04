@@ -4,6 +4,7 @@ import { ago } from "./format";
 import { useLiveStream, usePref, useRoute } from "./hooks";
 import { BlockDetail, Blocks } from "./pages/Blocks";
 import { Overview } from "./pages/Overview";
+import { Research } from "./pages/Research";
 import { Builders, LargeSwaps, Sandwiches, TxPage } from "./pages/Tables";
 
 const NAV = [
@@ -12,6 +13,7 @@ const NAV = [
   { path: "builders", label: "Builders" },
   { path: "sandwiches", label: "Sandwiches" },
   { path: "swaps", label: "Large swaps" },
+  { path: "research", label: "Research" },
 ];
 
 type Theme = "system" | "light" | "dark";
@@ -51,10 +53,11 @@ export function App() {
   else if (page === "builders") body = <Builders params={params} />;
   else if (page === "sandwiches") body = <Sandwiches params={params} liveCount={live.blockCount} />;
   else if (page === "swaps") body = <LargeSwaps />;
+  else if (page === "research") body = <Research params={params} />;
   else if (page === "tx" && arg) body = <TxPage hash={arg.toLowerCase()} />;
   else body = <p>Page not found. <a href="#/">Go to overview</a></p>;
 
-  const usesParams = !page || page === "builders";
+  const usesParams = !page || page === "builders" || page === "research";
 
   return (
     <div className="app">

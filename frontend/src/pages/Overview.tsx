@@ -62,7 +62,7 @@ export function Overview({ params, live }: { params: Params; live: LiveState }) 
           <StatTile label="Uniswap router swaps seen publicly" value={pct(o.router_swap_public_share)}
             note={`${num(o.public_router_swaps)} of ${num(o.router_swaps)}`} />
           <StatTile label="Sandwich attacks detected" value={num(o.sandwiches)}
-            note={`${num(o.sandwich_attackers)} attackers · ${eth(o.sandwich_gross_profit_eth)} gross`} />
+            note={`${num(o.sandwich_attackers)} attackers · ${eth(o.sandwich_net_profit_eth)} net of gas`} />
           <StatTile label="Sandwich victims seen publicly" value={pct(o.sandwich_victim_public_share)}
             note={`${num(o.sandwich_victims_public)} of ${num(o.sandwiches)}`} />
           <StatTile label="Pending hashes recorded" value={compact(o.pending_hashes)}

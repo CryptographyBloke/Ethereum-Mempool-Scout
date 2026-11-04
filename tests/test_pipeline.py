@@ -21,7 +21,7 @@ TS = 1_700_000_000
 def dataset(tmp_path):
     db = str(tmp_path / "scout.sqlite")
     blocks = {100: sandwich_block(100, TS)}
-    collector = Collector(CollectorConfig(wss_url="wss://example.invalid", db_path=db, large_swap_eth=10))
+    collector = Collector(CollectorConfig(wss_url="wss://example.invalid", db_path=db, large_swap_eth=10, vantage="test"))
     collector.eth = (FakeEth(blocks, {POOL: (WETH, USDC)}))
     collector.session_id = collector.store.start_session("test", "example.invalid", 1, "full", "test")
     # Session started 10 minutes before the block -> block is eligible after the 5 min warm-up.
@@ -32,8 +32,10 @@ def dataset(tmp_path):
         collector.on_pending(h(2))
         collector.on_pending(h(4))
         collector.store.conn.execute("UPDATE pending_tx SET first_seen_ms=?", (TS * 1000 - 3_500,))
+        collector.store.conn.execute("UPDATE pending_sighting SET first_seen_ms=?", (TS * 1000 - 3_500,))
         tx = await collector.eth.get_transaction(h(2))
         collector.handle_tx(h(2), tx, TS * 1000 - 3_500)
+        await asyncio.gather(*collector.background)  # slippage quote
         await collector.process_block(100)
 
     asyncio.run(scenario())
