@@ -14,7 +14,6 @@ COPY mempool_scout ./mempool_scout
 RUN pip install --no-cache-dir .
 COPY --from=web /web/dist ./frontend/dist
 ENV SCOUT_DB=/data/scout.sqlite
-VOLUME ["/data"]
 EXPOSE 8000
 ENTRYPOINT ["python", "-m", "mempool_scout.process_manager"]
 CMD ["all"]
