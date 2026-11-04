@@ -4,8 +4,10 @@ import { Legend, SplitBar } from "../components/charts";
 import { Badge, Card, Empty, ErrorState, Hash, Loading, StatTile, Visibility } from "../components/ui";
 import { etherscanBlock, num, pct, short, time, txTypeName } from "../format";
 import { useApi } from "../hooks";
+import { useI18n } from "../i18n";
 
 export function Blocks({ params, liveCount }: { params: Params; liveCount: number }) {
+  const { t } = useI18n();
   const first = useApi(() => api.blocks(params), [params.graceMs, liveCount]);
   const [older, setOlder] = useState<BlockRow[]>([]);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -26,13 +28,13 @@ export function Blocks({ params, liveCount }: { params: Params; liveCount: numbe
   };
 
   return (
-    <Card title="Recent blocks" subtitle="Each row shows how much of the block was visible in the public mempool before inclusion."
-      actions={<Legend items={[{ label: "Public", color: "var(--series-1)" }, { label: "Private", color: "var(--series-2)" }]} />}>
-      {rows.length === 0 ? <Empty>No blocks yet.</Empty> : (
+    <Card title={t("Recent blocks")} subtitle={t("Each row shows how much of the block was visible in the public mempool before inclusion.")}
+      actions={<Legend items={[{ label: t("Public"), color: "var(--series-1)" }, { label: t("Private"), color: "var(--series-2)" }]} />}>
+      {rows.length === 0 ? <Empty>{t("No blocks yet.")}</Empty> : (
         <div className="table-wrap">
           <table>
             <thead>
-              <tr><th>Block</th><th>Time</th><th>Builder</th><th className="num">Txs</th><th style={{ minWidth: 160 }}>Public / private</th><th className="num">Swaps</th><th className="num">Sandwiches</th></tr>
+              <tr><th>{t("Block")}</th><th>{t("Time")}</th><th>{t("Builder")}</th><th className="num">{t("Txs")}</th><th style={{ minWidth: 160 }}>{t("Public / private")}</th><th className="num">{t("Swaps")}</th><th className="num">{t("Sandwiches")}</th></tr>
             </thead>
             <tbody>
               {rows.map((b) => (
@@ -41,7 +43,7 @@ export function Blocks({ params, liveCount }: { params: Params; liveCount: numbe
                   <td className="muted">{time(b.timestamp * 1000)}</td>
                   <td className="truncate" title={b.builder_tag}>{b.builder_tag}</td>
                   <td className="num">{num(b.tx_count)}</td>
-                  <td><div className="bar-cell"><SplitBar share={b.public_share} label={`Block ${b.number}`} /><span className="num">{pct(b.public_share, 0)}</span></div></td>
+                  <td><div className="bar-cell"><SplitBar share={b.public_share} label={`${t("Block")} ${b.number}`} /><span className="num">{pct(b.public_share, 0)}</span></div></td>
                   <td className="num">{num(b.swaps)}</td>
                   <td className="num">{b.sandwiches > 0 ? <Badge tone="critical" icon="▲">{b.sandwiches}</Badge> : <span className="muted">0</span>}</td>
                 </tr>
@@ -51,7 +53,7 @@ export function Blocks({ params, liveCount }: { params: Params; liveCount: numbe
         </div>
       )}
       {rows.length >= 30 && (
-        <button className="btn" onClick={loadMore} disabled={loadingMore}>{loadingMore ? "Loading…" : "Load older blocks"}</button>
+        <button className="btn" onClick={loadMore} disabled={loadingMore}>{loadingMore ? t("Loading…") : t("Load older blocks")}</button>
       )}
     </Card>
   );
@@ -60,6 +62,7 @@ export function Blocks({ params, liveCount }: { params: Params; liveCount: numbe
 type Filter = "all" | "private" | "public" | "swaps" | "sandwich";
 
 export function BlockDetail({ number, params }: { number: number; params: Params }) {
+  const { t, t: translate } = useI18n();
   const b = useApi(() => api.block(number, params), [number, params.graceMs]);
   const [filter, setFilter] = useState<Filter>("all");
   const txs = useMemo(() => {
@@ -81,29 +84,29 @@ export function BlockDetail({ number, params }: { number: number; params: Params
 
   return (
     <div className="stack">
-      <p><a href="#/blocks">← All blocks</a></p>
-      <Card title={`Block ${num(d.number)}`} subtitle={<>{time(d.timestamp * 1000)} · built by <strong>{d.builder_tag}</strong> · <a href={etherscanBlock(d.number)} target="_blank" rel="noreferrer">Etherscan ↗</a></>}>
+      <p><a href="#/blocks">← {t("All blocks")}</a></p>
+      <Card title={`${t("Block")} ${num(d.number)}`} subtitle={<>{time(d.timestamp * 1000)} · {t("built by")} <strong>{d.builder_tag}</strong> · <a href={etherscanBlock(d.number)} target="_blank" rel="noreferrer">Etherscan ↗</a></>}>
         <div className="stat-grid">
-          <StatTile label="Transactions" value={num(d.tx_count)} />
-          <StatTile label="Seen publicly first" value={pct(d.txs.length ? pub / d.txs.length : null)} note={`${num(pub)} of ${num(d.txs.length)}`} />
-          <StatTile label="Router swaps" value={num(d.txs.filter((t) => t.is_router_swap).length)} />
-          <StatTile label="Sandwiches" value={num(d.sandwiches.length)} />
+          <StatTile label={t("Transactions")} value={num(d.tx_count)} />
+          <StatTile label={t("Seen publicly first")} value={pct(d.txs.length ? pub / d.txs.length : null)} note={`${num(pub)} of ${num(d.txs.length)}`} />
+          <StatTile label={t("Router swaps")} value={num(d.txs.filter((t) => t.is_router_swap).length)} />
+          <StatTile label={t("Sandwiches")} value={num(d.sandwiches.length)} />
         </div>
-        <p className="muted small mono">Fee recipient {short(d.fee_recipient, 10, 8)} · gas {num(d.gas_used)} / {num(d.gas_limit)}</p>
+        <p className="muted small mono">{t("Fee recipient")} {short(d.fee_recipient, 10, 8)} · gas {num(d.gas_used)} / {num(d.gas_limit)}</p>
       </Card>
 
-      <Card title="Transactions" actions={
-        <div className="seg" role="group" aria-label="Filter transactions">
+      <Card title={t("Transactions")} actions={
+        <div className="seg" role="group" aria-label={t("Filter transactions")}>
           {(["all", "public", "private", "swaps", "sandwich"] as Filter[]).map((f) => (
-            <button key={f} aria-pressed={filter === f} onClick={() => setFilter(f)}>{f}</button>
+            <button key={f} aria-pressed={filter === f} onClick={() => setFilter(f)}>{t(f)}</button>
           ))}
         </div>
       }>
-        {txs.length === 0 ? <Empty>No transactions match this filter.</Empty> : (
+        {txs.length === 0 ? <Empty>{t("No transactions match this filter.")}</Empty> : (
           <div className="table-wrap">
             <table>
               <thead>
-                <tr><th className="num">#</th><th>Hash</th><th>From</th><th>To</th><th>Type</th><th>Mempool</th><th className="num">Waited</th><th className="num">Tip (gwei)</th><th>Swap</th><th>Sandwich</th></tr>
+                <tr><th className="num">#</th><th>{t("Hash")}</th><th>{t("From")}</th><th>{t("To")}</th><th>{t("Type")}</th><th>{t("Mempool")}</th><th className="num">{t("Waited")}</th><th className="num">{t("Tip (gwei)")}</th><th>{t("Swap")}</th><th>{t("Sandwich")}</th></tr>
               </thead>
               <tbody>
                 {txs.map((t) => (
@@ -116,8 +119,8 @@ export function BlockDetail({ number, params }: { number: number; params: Params
                     <td><Visibility isPublic={!!t.is_public} /></td>
                     <td className="num">{t.inclusion_delay_s !== null && t.is_public ? `${t.inclusion_delay_s.toFixed(1)} s` : "–"}</td>
                     <td className="num">{t.priority_fee_gwei === null ? "–" : t.priority_fee_gwei.toFixed(2)}</td>
-                    <td className="truncate">{t.swap_function ?? (t.is_deploy ? "contract deploy" : "")}{t.eth_notional ? ` · ${t.eth_notional.toFixed(2)} ETH` : ""}</td>
-                    <td>{t.sandwich_role && <Badge tone={t.sandwich_role === "victim" ? "critical" : "neutral"} icon={t.sandwich_role === "victim" ? "▲" : undefined}>{t.sandwich_role}</Badge>}</td>
+                    <td className="truncate">{t.swap_function ?? (t.is_deploy ? translate("contract deploy") : "")}{t.eth_notional ? ` · ${t.eth_notional.toFixed(2)} ETH` : ""}</td>
+                    <td>{t.sandwich_role && <Badge tone={t.sandwich_role === "victim" ? "critical" : "neutral"} icon={t.sandwich_role === "victim" ? "▲" : undefined}>{translate(t.sandwich_role)}</Badge>}</td>
                   </tr>
                 ))}
               </tbody>
